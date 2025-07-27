@@ -55,6 +55,9 @@ aws_region = "{self.config['defaults']['aws_region']}"
 instance_type = "{self.config['defaults']['instance_type']}"
 min_instances = {self.config['defaults']['min_instances']}
 max_instances = {self.config['defaults']['max_instances']}
+enable_database = {str(self.config['defaults']['enable_database']).lower()}
+database_type = "{self.config['defaults']['database_type']}"
+database_instance_class = "{self.config['defaults']['database_instance_class']}"
 """
         
         with open(target_dir / "terraform" / "terraform.tfvars", "w") as f:

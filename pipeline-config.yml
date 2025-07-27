@@ -17,6 +17,9 @@ defaults:
   min_instances: 2
   max_instances: 6
   health_check_path: "/health"
+  enable_database: false
+  database_type: "postgres"
+  database_instance_class: "db.t3.micro"
   
 # Environment configurations
 environments:

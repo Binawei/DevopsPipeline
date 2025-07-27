@@ -6,6 +6,7 @@ Automatically builds and deploys your applications (Java, React, Node.js) to AWS
 - ✅ **Build on every push** (any branch)
 - ✅ **Manual approval for deployment** (main/master only)
 - ✅ **Auto-scaling infrastructure** (Load Balancer + EC2)
+- ✅ **Managed RDS database** (PostgreSQL/MySQL)
 - ✅ **Zero manual setup** (everything automated)
 
 ---
@@ -70,6 +71,9 @@ jobs:
       project_name: "my-app-name"           # Change this
       app_type: "java-spring-boot"          # Change this: java-spring-boot, react-frontend, node-backend
       aws_region: "us-east-1"
+      enable_database: true                  # Add this for database support
+      database_type: "postgres"             # Add this: postgres or mysql
+      database_instance_class: "db.t3.micro" # Add this: db.t3.micro (free tier)
     secrets:
       AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
@@ -138,6 +142,56 @@ jobs:
       AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
       EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
 ```
+
+---
+
+## 📊 **Database Support (Optional)**
+
+### **Enable Managed RDS Database**
+
+Add these parameters to enable automatic database creation:
+
+```yaml
+with:
+  project_name: "my-app"
+  app_type: "java-spring-boot"
+  enable_database: true              # Enables RDS
+  database_type: "postgres"          # postgres or mysql
+  database_instance_class: "db.t3.micro"  # Free tier
+```
+
+### **What You Get**
+- ✅ **PostgreSQL or MySQL** RDS instance
+- ✅ **Encrypted storage** and backups
+- ✅ **Private database subnets**
+- ✅ **Automatic credentials** injection
+- ✅ **Free tier eligible** (db.t3.micro)
+
+### **Application Configuration**
+
+**Spring Boot** (`application.yml`):
+```yaml
+spring:
+  datasource:
+    url: ${SPRING_DATASOURCE_URL:jdbc:h2:mem:testdb}
+    username: ${SPRING_DATASOURCE_USERNAME:sa}
+    password: ${SPRING_DATASOURCE_PASSWORD:}
+  jpa:
+    hibernate:
+      ddl-auto: update
+```
+
+**Node.js**:
+```javascript
+const dbConfig = {
+  host: process.env.DB_HOST,
+  database: process.env.DB_NAME,
+  username: process.env.DB_USERNAME,
+  password: process.env.DB_PASSWORD
+};
+```
+
+**See [DATABASE_GUIDE.md](docs/DATABASE_GUIDE.md) for complete details.**
 
 ---
 

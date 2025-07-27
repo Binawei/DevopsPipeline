@@ -13,6 +13,18 @@ on:
         required: false
         type: string
         default: 'us-east-1'
+      enable_database:
+        required: false
+        type: boolean
+        default: false
+      database_type:
+        required: false
+        type: string
+        default: 'postgres'
+      database_instance_class:
+        required: false
+        type: string
+        default: 'db.t3.micro'
     secrets:
       AWS_ACCESS_KEY_ID:
         required: true
@@ -155,6 +167,8 @@ jobs:
             -e project_name=${{ inputs.project_name }} \
             -e app_type=${{ inputs.app_type }} \
             -e image_tag=$IMAGE_TAG \
-            -e aws_region=${{ inputs.aws_region }}
+            -e aws_region=${{ inputs.aws_region }} \
+            -e enable_database=${{ inputs.enable_database }} \
+            -e database_type=${{ inputs.database_type }}
             
           echo "🎉 Deployment completed successfully!"
