@@ -113,11 +113,21 @@ jobs:
         TF_VAR_enable_database: ${{ inputs.enable_database }}
         TF_VAR_database_type: ${{ inputs.database_type }}
         TF_VAR_database_instance_class: ${{ inputs.database_instance_class }}
+        TF_VAR_skip_asg_creation: ${{ env.SKIP_TERRAFORM_ASG }}
       run: |
         cd devops/terraform
         terraform init
-        terraform plan
-        terraform apply -auto-approve
+        
+        if [ "${{ env.SKIP_TERRAFORM_ASG }}" = "true" ]; then
+          echo "Skipping Terraform ASG management - using existing instances"
+          # Only apply non-ASG resources
+          terraform plan -target=aws_security_group.app -target=aws_security_group.alb -target=aws_iam_role.ec2_role -target=aws_iam_role_policy.parameter_store_policy -target=aws_iam_instance_profile.ec2_profile
+          terraform apply -auto-approve -target=aws_security_group.app -target=aws_security_group.alb -target=aws_iam_role.ec2_role -target=aws_iam_role_policy.parameter_store_policy -target=aws_iam_instance_profile.ec2_profile
+        else
+          echo "Running full Terraform deployment"
+          terraform plan
+          terraform apply -auto-approve
+        fi
         
         # Get outputs
         echo "LOAD_BALANCER_DNS=$(terraform output -raw load_balancer_dns)" >> $GITHUB_ENV
@@ -129,15 +139,17 @@ jobs:
         EXISTING_INSTANCES=$(aws autoscaling describe-auto-scaling-groups \
           --auto-scaling-group-names "${{ inputs.project_name }}-asg" \
           --query 'AutoScalingGroups[0].Instances[?LifecycleState==`InService`].InstanceId' \
-          --output text)
+          --output text 2>/dev/null || echo "")
         
         echo "Existing instances: $EXISTING_INSTANCES"
         
-        if [ -n "$EXISTING_INSTANCES" ]; then
-          echo "Instances already exist, skipping ASG management"
+        if [ -n "$EXISTING_INSTANCES" ] && [ "$EXISTING_INSTANCES" != "None" ]; then
+          echo "Instances already exist, skipping Terraform ASG management"
+          echo "SKIP_TERRAFORM_ASG=true" >> $GITHUB_ENV
           echo "SKIP_ASG_MANAGEMENT=true" >> $GITHUB_ENV
         else
-          echo "No existing instances, will manage ASG"
+          echo "No existing instances, will run full Terraform"
+          echo "SKIP_TERRAFORM_ASG=false" >> $GITHUB_ENV
           echo "SKIP_ASG_MANAGEMENT=false" >> $GITHUB_ENV
         fi
     
@@ -164,41 +176,30 @@ jobs:
         echo "Waiting for instances to launch..."
         sleep 60
     
-    - name: Get EC2 instance IPs and create inventory
+    - name: Get running EC2 instances
       run: |
-        # Get Auto Scaling Group instances (retry logic)
+        # Get running instances from ASG
         for i in {1..5}; do
-          echo "Attempt $i: Getting Auto Scaling Group instances..."
+          echo "Attempt $i: Getting running instances from ASG..."
           
-          # First try InService instances
           INSTANCE_IDS=$(aws autoscaling describe-auto-scaling-groups \
             --auto-scaling-group-names "${{ inputs.project_name }}-asg" \
             --query 'AutoScalingGroups[0].Instances[?LifecycleState==`InService`].InstanceId' \
-            --output text)
+            --output text 2>/dev/null || echo "")
           
-          # If no InService instances, try all instances
-          if [ -z "$INSTANCE_IDS" ]; then
-            echo "No InService instances, checking all instances..."
-            INSTANCE_IDS=$(aws autoscaling describe-auto-scaling-groups \
-              --auto-scaling-group-names "${{ inputs.project_name }}-asg" \
-              --query 'AutoScalingGroups[0].Instances[].InstanceId' \
-              --output text)
-          fi
+          echo "Instance IDs from ASG: $INSTANCE_IDS"
           
-          echo "Instance IDs: $INSTANCE_IDS"
-          
-          # If we have instances, check if they're running
-          if [ -n "$INSTANCE_IDS" ]; then
-            RUNNING_IPS=$(aws ec2 describe-instances \
+          if [ -n "$INSTANCE_IDS" ] && [ "$INSTANCE_IDS" != "None" ]; then
+            # Verify instances are actually running
+            RUNNING_INSTANCES=$(aws ec2 describe-instances \
               --instance-ids $INSTANCE_IDS \
-              --query 'Reservations[].Instances[?State.Name==`running`].PublicIpAddress' \
+              --query 'Reservations[].Instances[?State.Name==`running`].InstanceId' \
               --output text)
             
-            echo "Running instance IPs: $RUNNING_IPS"
+            echo "Running instances: $RUNNING_INSTANCES"
             
-            if [ -n "$RUNNING_IPS" ]; then
-              # Store IPs for later use
-              echo "$RUNNING_IPS" > /tmp/instance_ips.txt
+            if [ -n "$RUNNING_INSTANCES" ] && [ "$RUNNING_INSTANCES" != "None" ]; then
+              echo "$RUNNING_INSTANCES" > /tmp/instance_ids.txt
               break
             fi
           fi
@@ -207,46 +208,20 @@ jobs:
           sleep 30
         done
         
-        # Check if we found any running instances
-        if [ ! -f /tmp/instance_ips.txt ]; then
+        if [ ! -f /tmp/instance_ids.txt ]; then
           echo "No running instances found after retries"
           exit 1
         fi
         
-        # Read the IPs we found
-        IPS=$(cat /tmp/instance_ips.txt)
-        echo "Using IPs: $IPS"
-        
-        # Create dynamic inventory
-        echo "[production]" > devops/ansible/dynamic-inventory
-        i=1
-        for ip in $IPS; do
-          if [ "$ip" != "None" ] && [ -n "$ip" ]; then
-            echo "$ip ansible_user=ec2-user" >> devops/ansible/dynamic-inventory
-            i=$((i+1))
-          fi
-        done
-        echo "" >> devops/ansible/dynamic-inventory
-        echo "[production:vars]" >> devops/ansible/dynamic-inventory
-        echo "environment=production" >> devops/ansible/dynamic-inventory
-        
-        echo "Generated inventory:"
-        cat devops/ansible/dynamic-inventory
+        echo "Found running instances: $(cat /tmp/instance_ids.txt)"
     
     - name: Deploy to EC2 via Systems Manager
       env:
         ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
         IMAGE_TAG: ${{ github.sha }}
       run: |
-        # Read instance IPs
-        IPS=$(cat /tmp/instance_ips.txt)
-        
-        # Get instance IDs from IPs
-        INSTANCE_IDS=$(aws ec2 describe-instances \
-          --filters "Name=ip-address,Values=$(echo $IPS | tr ' ' ',')" "Name=instance-state-name,Values=running" \
-          --query 'Reservations[].Instances[].InstanceId' \
-          --output text)
-        
+        # Read instance IDs
+        INSTANCE_IDS=$(cat /tmp/instance_ids.txt)
         echo "Deploying to instances: $INSTANCE_IDS"
         
         # Wait for instances to be ready for SSM
@@ -267,8 +242,14 @@ jobs:
             fi
             
             if [ $i -eq 10 ]; then
-              echo "Instance $instance_id not ready for SSM after 10 attempts"
-              exit 1
+              echo "Instance $instance_id not ready for SSM after 10 attempts. Trying manual restart..."
+              # Try to restart SSM agent
+              aws ssm send-command \
+                --instance-ids "$instance_id" \
+                --document-name "AWS-RunShellScript" \
+                --parameters 'commands=["sudo systemctl restart amazon-ssm-agent"]' \
+                --comment "Restart SSM agent" || echo "Failed to restart SSM agent"
+              sleep 60
             fi
             
             sleep 30
