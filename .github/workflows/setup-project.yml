@@ -162,31 +162,52 @@ jobs:
       run: |
         echo "Setting ASG desired capacity to 1 to ensure instances are created"
         
+        # Check current ASG status
+        echo "Current ASG status:"
+        aws autoscaling describe-auto-scaling-groups \
+          --auto-scaling-group-names "${{ inputs.project_name }}-asg" \
+          --query 'AutoScalingGroups[0].{MinSize:MinSize,MaxSize:MaxSize,DesiredCapacity:DesiredCapacity,Instances:Instances}'
+        
         aws autoscaling update-auto-scaling-group \
           --auto-scaling-group-name "${{ inputs.project_name }}-asg" \
           --min-size 1 \
           --desired-capacity 1
         
+        echo "Updated ASG status:"
+        aws autoscaling describe-auto-scaling-groups \
+          --auto-scaling-group-names "${{ inputs.project_name }}-asg" \
+          --query 'AutoScalingGroups[0].{MinSize:MinSize,MaxSize:MaxSize,DesiredCapacity:DesiredCapacity,Instances:Instances}'
+        
         echo "Waiting for instances to launch and initialize..."
-        sleep 120
+        echo "This may take 3-5 minutes for instances to become InService"
+        sleep 180
     
     - name: Get running EC2 instances
       run: |
-        # Get running instances from ASG
-        for i in {1..5}; do
-          echo "Attempt $i: Getting running instances from ASG..."
+        # Wait for instances to be created and become InService
+        for i in {1..10}; do
+          echo "Attempt $i: Checking ASG instances..."
           
-          INSTANCE_IDS=$(aws autoscaling describe-auto-scaling-groups \
+          # Get all instances from ASG (any lifecycle state)
+          ALL_INSTANCES=$(aws autoscaling describe-auto-scaling-groups \
+            --auto-scaling-group-names "${{ inputs.project_name }}-asg" \
+            --query 'AutoScalingGroups[0].Instances[].{Id:InstanceId,State:LifecycleState}' \
+            --output text 2>/dev/null || echo "")
+          
+          echo "All ASG instances: $ALL_INSTANCES"
+          
+          # Get InService instances
+          INSERVICE_INSTANCES=$(aws autoscaling describe-auto-scaling-groups \
             --auto-scaling-group-names "${{ inputs.project_name }}-asg" \
             --query 'AutoScalingGroups[0].Instances[?LifecycleState==`InService`].InstanceId' \
             --output text 2>/dev/null || echo "")
           
-          echo "Instance IDs from ASG: $INSTANCE_IDS"
+          echo "InService instances: $INSERVICE_INSTANCES"
           
-          if [ -n "$INSTANCE_IDS" ] && [ "$INSTANCE_IDS" != "None" ]; then
-            # Verify instances are actually running
+          if [ -n "$INSERVICE_INSTANCES" ] && [ "$INSERVICE_INSTANCES" != "None" ]; then
+            # Verify instances are actually running in EC2
             RUNNING_INSTANCES=$(aws ec2 describe-instances \
-              --instance-ids $INSTANCE_IDS \
+              --instance-ids $INSERVICE_INSTANCES \
               --query 'Reservations[].Instances[?State.Name==`running`].InstanceId' \
               --output text)
             
@@ -198,8 +219,8 @@ jobs:
             fi
           fi
           
-          echo "No running instances found, waiting 30 seconds..."
-          sleep 30
+          echo "Waiting for instances to become InService and running..."
+          sleep 60
         done
         
         if [ ! -f /tmp/instance_ids.txt ]; then
