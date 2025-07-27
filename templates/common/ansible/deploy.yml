@@ -1,0 +1,52 @@
+---
+- name: Deploy Application to EC2
+  hosts: all
+  become: yes
+  vars:
+    project_name: "{{ project_name }}"
+    app_type: "{{ app_type }}"
+    image_tag: "{{ image_tag | default('latest') }}"
+    ecr_registry: "{{ ansible_env.ECR_REGISTRY }}"
+    
+  tasks:
+    - name: Login to ECR
+      shell: |
+        aws ecr get-login-password --region {{ aws_region }} | docker login --username AWS --password-stdin {{ ecr_registry }}
+      
+    - name: Pull application image
+      docker_image:
+        name: "{{ ecr_registry }}/{{ project_name }}:{{ image_tag }}"
+        source: pull
+        
+    - name: Stop existing container
+      docker_container:
+        name: "{{ project_name }}"
+        state: stopped
+      ignore_errors: yes
+      
+    - name: Remove existing container
+      docker_container:
+        name: "{{ project_name }}"
+        state: absent
+      ignore_errors: yes
+      
+    - name: Start new container
+      docker_container:
+        name: "{{ project_name }}"
+        image: "{{ ecr_registry }}/{{ project_name }}:{{ image_tag }}"
+        state: started
+        restart_policy: unless-stopped
+        ports:
+          - "{{ '80:80' if app_type == 'react-frontend' else '8080:8080' }}"
+        env:
+          ENVIRONMENT: "{{ environment }}"
+          
+    - name: Wait for application
+      uri:
+        url: "http://{{ ansible_host }}:{{ '80' if app_type == 'react-frontend' else '8080' }}/{{ 'health' if app_type == 'react-frontend' else 'actuator/health' }}"
+        method: GET
+        status_code: 200
+      register: result
+      until: result.status == 200
+      retries: 30
+      delay: 10

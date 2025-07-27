@@ -1,0 +1,192 @@
+variable "project_name" { type = string }
+variable "app_type" { type = string }
+variable "aws_region" { type = string }
+variable "instance_type" { type = string }
+variable "min_instances" { type = number }
+variable "max_instances" { type = number }
+
+provider "aws" {
+  region = var.aws_region
+}
+
+# ECR Repository
+resource "aws_ecr_repository" "app" {
+  name = var.project_name
+  
+  image_scanning_configuration {
+    scan_on_push = true
+  }
+}
+
+# VPC and Networking (reusable)
+resource "aws_vpc" "main" {
+  cidr_block           = "10.0.0.0/16"
+  enable_dns_hostnames = true
+  enable_dns_support   = true
+  tags = { Name = "${var.project_name}-vpc" }
+}
+
+resource "aws_subnet" "public" {
+  count             = 2
+  vpc_id            = aws_vpc.main.id
+  cidr_block        = "10.0.${count.index + 1}.0/24"
+  availability_zone = data.aws_availability_zones.available.names[count.index]
+  map_public_ip_on_launch = true
+  tags = { Name = "${var.project_name}-public-${count.index + 1}" }
+}
+
+resource "aws_internet_gateway" "main" {
+  vpc_id = aws_vpc.main.id
+  tags = { Name = "${var.project_name}-igw" }
+}
+
+resource "aws_route_table" "public" {
+  vpc_id = aws_vpc.main.id
+  route {
+    cidr_block = "0.0.0.0/0"
+    gateway_id = aws_internet_gateway.main.id
+  }
+  tags = { Name = "${var.project_name}-public-rt" }
+}
+
+resource "aws_route_table_association" "public" {
+  count          = length(aws_subnet.public)
+  subnet_id      = aws_subnet.public[count.index].id
+  route_table_id = aws_route_table.public.id
+}
+
+# Security Groups
+resource "aws_security_group" "app" {
+  name_prefix = "${var.project_name}-app-"
+  vpc_id      = aws_vpc.main.id
+
+  dynamic "ingress" {
+    for_each = var.app_type == "react-frontend" ? [80] : [8080]
+    content {
+      from_port   = ingress.value
+      to_port     = ingress.value
+      protocol    = "tcp"
+      cidr_blocks = ["0.0.0.0/0"]
+    }
+  }
+
+  ingress {
+    from_port   = 22
+    to_port     = 22
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+}
+
+# Load Balancer
+resource "aws_lb" "main" {
+  name               = "${var.project_name}-alb"
+  internal           = false
+  load_balancer_type = "application"
+  security_groups    = [aws_security_group.alb.id]
+  subnets            = aws_subnet.public[*].id
+}
+
+resource "aws_security_group" "alb" {
+  name_prefix = "${var.project_name}-alb-"
+  vpc_id      = aws_vpc.main.id
+
+  ingress {
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+}
+
+# Auto Scaling Group
+resource "aws_launch_template" "app" {
+  name_prefix   = "${var.project_name}-"
+  image_id      = data.aws_ami.amazon_linux.id
+  instance_type = var.instance_type
+  key_name      = "${var.project_name}-key"
+
+  vpc_security_group_ids = [aws_security_group.app.id]
+
+  user_data = base64encode(templatefile("${path.module}/user_data.sh", {
+    project_name = var.project_name
+    app_type     = var.app_type
+    aws_region   = var.aws_region
+  }))
+}
+
+resource "aws_autoscaling_group" "app" {
+  name                = "${var.project_name}-asg"
+  vpc_zone_identifier = aws_subnet.public[*].id
+  target_group_arns   = [aws_lb_target_group.app.arn]
+  health_check_type   = "ELB"
+
+  min_size         = var.min_instances
+  max_size         = var.max_instances
+  desired_capacity = var.min_instances
+
+  launch_template {
+    id      = aws_launch_template.app.id
+    version = "$Latest"
+  }
+}
+
+# Target Group
+resource "aws_lb_target_group" "app" {
+  name     = "${var.project_name}-tg"
+  port     = var.app_type == "react-frontend" ? 80 : 8080
+  protocol = "HTTP"
+  vpc_id   = aws_vpc.main.id
+
+  health_check {
+    path = var.app_type == "java-spring-boot" ? "/actuator/health" : "/health"
+  }
+}
+
+resource "aws_lb_listener" "app" {
+  load_balancer_arn = aws_lb.main.arn
+  port              = "80"
+  protocol          = "HTTP"
+
+  default_action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.app.arn
+  }
+}
+
+# Data sources
+data "aws_availability_zones" "available" {
+  state = "available"
+}
+
+data "aws_ami" "amazon_linux" {
+  most_recent = true
+  owners      = ["amazon"]
+  filter {
+    name   = "name"
+    values = ["amzn2-ami-hvm-*-x86_64-gp2"]
+  }
+}
+
+# Outputs
+output "load_balancer_dns" {
+  value = aws_lb.main.dns_name
+}
+
+output "ecr_repository_url" {
+  value = aws_ecr_repository.app.repository_url
+}

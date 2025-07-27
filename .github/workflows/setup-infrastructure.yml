@@ -1,0 +1,110 @@
+name: Setup Infrastructure
+
+on:
+  workflow_call:
+    inputs:
+      project_name:
+        required: true
+        type: string
+      app_type:
+        required: true
+        type: string
+      aws_region:
+        required: false
+        type: string
+        default: 'us-east-1'
+    secrets:
+      AWS_ACCESS_KEY_ID:
+        required: true
+      AWS_SECRET_ACCESS_KEY:
+        required: true
+
+jobs:
+  setup-infrastructure:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout Pipeline Templates
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/DevOpsPipeline
+          ref: main
+          path: pipeline
+          
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ inputs.aws_region }}
+          
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        
+      - name: Generate Infrastructure Config
+        run: |
+          mkdir -p devops/terraform
+          cp -r pipeline/templates/common/terraform/* devops/terraform/
+          
+          # Generate terraform.tfvars
+          cat > devops/terraform/terraform.tfvars << EOF
+          project_name = "${{ inputs.project_name }}"
+          app_type = "${{ inputs.app_type }}"
+          aws_region = "${{ inputs.aws_region }}"
+          instance_type = "t3.medium"
+          min_instances = 2
+          max_instances = 6
+          EOF
+          
+      - name: Deploy Infrastructure
+        working-directory: devops/terraform
+        run: |
+          terraform init
+          terraform plan
+          terraform apply -auto-approve
+          
+      - name: Save Infrastructure Outputs
+        working-directory: devops/terraform
+        run: |
+          echo "ECR_REPOSITORY=$(terraform output -raw ecr_repository_url)" >> $GITHUB_ENV
+          echo "LOAD_BALANCER_DNS=$(terraform output -raw load_balancer_dns)" >> $GITHUB_ENV
+          
+      - name: Create Ansible Inventory
+        run: |
+          mkdir -p devops/ansible
+          
+          # Get EC2 instance IPs from Auto Scaling Group
+          ASG_NAME="${{ inputs.project_name }}-asg"
+          INSTANCE_IPS=$(aws ec2 describe-instances \
+            --filters "Name=tag:aws:autoscaling:groupName,Values=$ASG_NAME" "Name=instance-state-name,Values=running" \
+            --query 'Reservations[].Instances[].PublicIpAddress' \
+            --output text)
+          
+          # Create inventory files
+          cat > devops/ansible/staging << EOF
+          [staging]
+          $(echo "$INSTANCE_IPS" | head -1) ansible_user=ec2-user
+          
+          [all:vars]
+          project_name=${{ inputs.project_name }}
+          app_type=${{ inputs.app_type }}
+          aws_region=${{ inputs.aws_region }}
+          EOF
+          
+          cat > devops/ansible/production << EOF
+          [production]
+          $(echo "$INSTANCE_IPS" | tr ' ' '\n' | head -2 | tr '\n' ' ') ansible_user=ec2-user
+          
+          [all:vars]
+          project_name=${{ inputs.project_name }}
+          app_type=${{ inputs.app_type }}
+          aws_region=${{ inputs.aws_region }}
+          EOF
+          
+      - name: Commit Infrastructure Files
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add devops/
+          git commit -m "Add infrastructure configuration" || exit 0
+          git push

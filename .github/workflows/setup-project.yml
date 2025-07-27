@@ -1,0 +1,132 @@
+name: Setup Project Pipeline
+
+on:
+  workflow_call:
+    inputs:
+      project_name:
+        required: true
+        type: string
+      app_type:
+        required: true
+        type: string
+      aws_region:
+        required: false
+        type: string
+        default: 'us-east-1'
+    secrets:
+      AWS_ACCESS_KEY_ID:
+        required: true
+      AWS_SECRET_ACCESS_KEY:
+        required: true
+      EC2_SSH_KEY:
+        required: true
+
+jobs:
+  setup-and-deploy:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout Project Code
+        uses: actions/checkout@v4
+        
+      - name: Checkout Pipeline Templates
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/DevOpsPipeline
+          ref: main
+          path: pipeline-templates
+          
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ inputs.aws_region }}
+          
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        
+      - name: Check if Infrastructure Exists
+        id: check-infra
+        run: |
+          if aws ecr describe-repositories --repository-names ${{ inputs.project_name }} 2>/dev/null; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+          fi
+          
+      - name: Create Infrastructure
+        if: steps.check-infra.outputs.exists == 'false'
+        run: |
+          # Copy Terraform templates
+          cp -r pipeline-templates/templates/common/terraform/* .
+          
+          # Generate terraform.tfvars
+          cat > terraform.tfvars << EOF
+          project_name = "${{ inputs.project_name }}"
+          app_type = "${{ inputs.app_type }}"
+          aws_region = "${{ inputs.aws_region }}"
+          instance_type = "t3.medium"
+          min_instances = 2
+          max_instances = 6
+          EOF
+          
+          # Deploy infrastructure
+          terraform init
+          terraform apply -auto-approve
+          
+      - name: Login to ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+        
+      - name: Build and Push Docker Image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          docker build -t $ECR_REGISTRY/${{ inputs.project_name }}:$IMAGE_TAG .
+          docker push $ECR_REGISTRY/${{ inputs.project_name }}:$IMAGE_TAG
+          
+      - name: Setup SSH Key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.EC2_SSH_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          
+      - name: Install Ansible
+        run: pip install ansible boto3
+        
+      - name: Get EC2 Instances
+        id: get-instances
+        run: |
+          ASG_NAME="${{ inputs.project_name }}-asg"
+          INSTANCES=$(aws ec2 describe-instances \
+            --filters "Name=tag:aws:autoscaling:groupName,Values=$ASG_NAME" "Name=instance-state-name,Values=running" \
+            --query 'Reservations[].Instances[].PublicIpAddress' \
+            --output text)
+          echo "instances=$INSTANCES" >> $GITHUB_OUTPUT
+          
+      - name: Deploy Application
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          # Create temporary inventory
+          cat > inventory << EOF
+          [servers]
+          ${{ steps.get-instances.outputs.instances }} ansible_user=ec2-user
+          
+          [all:vars]
+          project_name=${{ inputs.project_name }}
+          app_type=${{ inputs.app_type }}
+          aws_region=${{ inputs.aws_region }}
+          EOF
+          
+          # Copy and run deployment playbook
+          cp pipeline-templates/templates/common/ansible/deploy.yml .
+          
+          ansible-playbook -i inventory deploy.yml \
+            -e project_name=${{ inputs.project_name }} \
+            -e app_type=${{ inputs.app_type }} \
+            -e image_tag=$IMAGE_TAG \
+            -e aws_region=${{ inputs.aws_region }}

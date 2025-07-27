@@ -1,0 +1,33 @@
+name: Deploy Frontend
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+jobs:
+  deploy-staging:
+    uses: YOUR_ORG/DevOpsPipeline/.github/workflows/deploy-frontend.yml@main
+    with:
+      project_name: "{{PROJECT_NAME}}"
+      app_type: "{{APP_TYPE}}"
+      environment: "staging"
+      aws_region: "us-east-1"
+    secrets:
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
+
+  deploy-production:
+    needs: deploy-staging
+    if: github.ref == 'refs/heads/main'
+    uses: YOUR_ORG/DevOpsPipeline/.github/workflows/deploy-frontend.yml@main
+    with:
+      project_name: "{{PROJECT_NAME}}"
+      app_type: "{{APP_TYPE}}"
+      environment: "production"
+      aws_region: "us-east-1"
+    secrets:
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
