@@ -226,12 +226,7 @@ jobs:
         
         # Run Ansible playbook
         cd devops/ansible
-        ansible-playbook -i inventory deploy.yml \
-          -e "ecr_registry=$ECR_REGISTRY" \
-          -e "image_tag=$IMAGE_TAG" \
-          -e "project_name=${{ inputs.project_name }}" \
-          -e "aws_region=${{ inputs.aws_region }}" \
-          -vv
+        ansible-playbook -i inventory deploy.yml -e "ecr_registry=$ECR_REGISTRY" -e "image_tag=$IMAGE_TAG" -e "project_name=${{ inputs.project_name }}" -e "aws_region=${{ inputs.aws_region }}" -vv
     
     - name: Output deployment info
       run: |
