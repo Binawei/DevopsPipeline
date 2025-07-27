@@ -123,6 +123,33 @@ jobs:
         echo "LOAD_BALANCER_DNS=$(terraform output -raw load_balancer_dns)" >> $GITHUB_ENV
         echo "ECR_REPOSITORY_URL=$(terraform output -raw ecr_repository_url)" >> $GITHUB_ENV
     
+    - name: Get EC2 instance IPs
+      run: |
+        # Get Auto Scaling Group instances
+        INSTANCE_IDS=$(aws autoscaling describe-auto-scaling-groups \
+          --auto-scaling-group-names "${{ inputs.project_name }}-asg" \
+          --query 'AutoScalingGroups[0].Instances[?LifecycleState==`InService`].InstanceId' \
+          --output text)
+        
+        # Get public IPs of instances
+        aws ec2 describe-instances \
+          --instance-ids $INSTANCE_IDS \
+          --query 'Reservations[].Instances[].[PublicIpAddress]' \
+          --output text > instance_ips.txt
+        
+        # Create dynamic inventory
+        echo "[production]" > devops/ansible/dynamic-inventory
+        i=1
+        while read ip; do
+          echo "prod-$i ansible_host=$ip ansible_user=ec2-user" >> devops/ansible/dynamic-inventory
+          i=$((i+1))
+        done < instance_ips.txt
+        echo "" >> devops/ansible/dynamic-inventory
+        echo "[production:vars]" >> devops/ansible/dynamic-inventory
+        echo "environment=production" >> devops/ansible/dynamic-inventory
+        
+        cat devops/ansible/dynamic-inventory
+    
     - name: Deploy to EC2 with Ansible
       env:
         ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
@@ -133,9 +160,10 @@ jobs:
         
         # Deploy application
         cd devops/ansible
-        ansible-playbook -i prod-inventory deploy.yml \
+        ansible-playbook -i dynamic-inventory deploy.yml \
           --extra-vars "image_tag=$IMAGE_TAG environment=production project_name=${{ inputs.project_name }} app_type=${{ inputs.app_type }}" \
-          --private-key <(echo "${{ secrets.EC2_SSH_KEY }}")
+          --private-key <(echo "${{ secrets.EC2_SSH_KEY }}") \
+          -o StrictHostKeyChecking=no
     
     - name: Output deployment info
       run: |
