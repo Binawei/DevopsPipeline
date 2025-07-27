@@ -113,21 +113,11 @@ jobs:
         TF_VAR_enable_database: ${{ inputs.enable_database }}
         TF_VAR_database_type: ${{ inputs.database_type }}
         TF_VAR_database_instance_class: ${{ inputs.database_instance_class }}
-        TF_VAR_skip_asg_creation: ${{ env.SKIP_TERRAFORM_ASG }}
       run: |
         cd devops/terraform
         terraform init
-        
-        if [ "${{ env.SKIP_TERRAFORM_ASG }}" = "true" ]; then
-          echo "Skipping Terraform ASG management - using existing instances"
-          # Only apply non-ASG resources
-          terraform plan -target=aws_security_group.app -target=aws_security_group.alb -target=aws_iam_role.ec2_role -target=aws_iam_role_policy.parameter_store_policy -target=aws_iam_instance_profile.ec2_profile
-          terraform apply -auto-approve -target=aws_security_group.app -target=aws_security_group.alb -target=aws_iam_role.ec2_role -target=aws_iam_role_policy.parameter_store_policy -target=aws_iam_instance_profile.ec2_profile
-        else
-          echo "Running full Terraform deployment"
-          terraform plan
-          terraform apply -auto-approve
-        fi
+        terraform plan
+        terraform apply -auto-approve
         
         # Get outputs
         echo "LOAD_BALANCER_DNS=$(terraform output -raw load_balancer_dns)" >> $GITHUB_ENV
@@ -143,38 +133,42 @@ jobs:
         
         echo "Existing instances: $EXISTING_INSTANCES"
         
+        # Check if any existing instances are SSM-ready
+        SSM_READY_COUNT=0
         if [ -n "$EXISTING_INSTANCES" ] && [ "$EXISTING_INSTANCES" != "None" ]; then
-          echo "Instances already exist, skipping Terraform ASG management"
-          echo "SKIP_TERRAFORM_ASG=true" >> $GITHUB_ENV
+          for instance_id in $EXISTING_INSTANCES; do
+            SSM_STATUS=$(aws ssm describe-instance-information \
+              --filters "Key=InstanceIds,Values=$instance_id" \
+              --query 'InstanceInformationList[0].PingStatus' \
+              --output text 2>/dev/null || echo "NotFound")
+            if [ "$SSM_STATUS" = "Online" ]; then
+              SSM_READY_COUNT=$((SSM_READY_COUNT + 1))
+            fi
+          done
+        fi
+        
+        echo "SSM-ready instances: $SSM_READY_COUNT"
+        
+        if [ $SSM_READY_COUNT -gt 0 ]; then
+          echo "Found SSM-ready instances, skipping ASG management"
           echo "SKIP_ASG_MANAGEMENT=true" >> $GITHUB_ENV
         else
-          echo "No existing instances, will run full Terraform"
-          echo "SKIP_TERRAFORM_ASG=false" >> $GITHUB_ENV
+          echo "No SSM-ready instances, will manage ASG"
           echo "SKIP_ASG_MANAGEMENT=false" >> $GITHUB_ENV
         fi
     
     - name: Ensure Auto Scaling Group has instances
       if: env.SKIP_ASG_MANAGEMENT == 'false'
       run: |
-        # Check current Auto Scaling Group status
-        echo "Checking Auto Scaling Group status..."
-        ASG_STATUS=$(aws autoscaling describe-auto-scaling-groups \
-          --auto-scaling-group-names "${{ inputs.project_name }}-asg" \
-          --query 'AutoScalingGroups[0].[MinSize,MaxSize,DesiredCapacity]' \
-          --output text)
-        
-        echo "ASG Status (Min/Max/Desired): $ASG_STATUS"
-        
-        # Get current min size and set desired capacity accordingly
-        MIN_SIZE=$(echo "$ASG_STATUS" | cut -f1)
-        echo "Setting desired capacity to minimum size: $MIN_SIZE"
+        echo "Setting ASG desired capacity to 1 to ensure instances are created"
         
         aws autoscaling update-auto-scaling-group \
           --auto-scaling-group-name "${{ inputs.project_name }}-asg" \
-          --desired-capacity $MIN_SIZE
+          --min-size 1 \
+          --desired-capacity 1
         
-        echo "Waiting for instances to launch..."
-        sleep 60
+        echo "Waiting for instances to launch and initialize..."
+        sleep 120
     
     - name: Get running EC2 instances
       run: |
