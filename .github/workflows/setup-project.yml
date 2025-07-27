@@ -316,6 +316,18 @@ jobs:
         done
         
         echo "Deployment commands sent to all instances"
+        
+        # Wait a bit for deployment to complete
+        sleep 60
+        
+        # Attach instances to target group after successful deployment
+        echo "Attaching instances to load balancer target group..."
+        for instance_id in $INSTANCE_IDS; do
+          aws elbv2 register-targets \
+            --target-group-arn $(aws elbv2 describe-target-groups --names "${{ inputs.project_name }}-tg" --query 'TargetGroups[0].TargetGroupArn' --output text) \
+            --targets Id=$instance_id,Port=8080
+          echo "Registered $instance_id with target group"
+        done
     
     - name: Output deployment info
       run: |
