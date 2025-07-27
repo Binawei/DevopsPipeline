@@ -22,7 +22,7 @@ jobs:
           tar -czf devops-pipeline.tar.gz templates/ scripts/ pipeline-config.yml setup.py
           
       - name: Upload to GitHub Packages
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: devops-pipeline
           path: devops-pipeline.tar.gz
