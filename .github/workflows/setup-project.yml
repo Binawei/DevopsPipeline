@@ -123,19 +123,47 @@ jobs:
         echo "LOAD_BALANCER_DNS=$(terraform output -raw load_balancer_dns)" >> $GITHUB_ENV
         echo "ECR_REPOSITORY_URL=$(terraform output -raw ecr_repository_url)" >> $GITHUB_ENV
     
-    - name: Get EC2 instance IPs and create inventory
+    - name: Ensure Auto Scaling Group has instances
       run: |
-        # Get Auto Scaling Group instances
-        echo "Getting Auto Scaling Group instances..."
-        INSTANCE_IDS=$(aws autoscaling describe-auto-scaling-groups \
+        # Check current Auto Scaling Group status
+        echo "Checking Auto Scaling Group status..."
+        ASG_STATUS=$(aws autoscaling describe-auto-scaling-groups \
           --auto-scaling-group-names "${{ inputs.project_name }}-asg" \
-          --query 'AutoScalingGroups[0].Instances[?LifecycleState==`InService`].InstanceId' \
+          --query 'AutoScalingGroups[0].[MinSize,MaxSize,DesiredCapacity]' \
           --output text)
         
-        echo "Instance IDs: $INSTANCE_IDS"
+        echo "ASG Status (Min/Max/Desired): $ASG_STATUS"
+        
+        # Ensure desired capacity is at least 1
+        aws autoscaling update-auto-scaling-group \
+          --auto-scaling-group-name "${{ inputs.project_name }}-asg" \
+          --desired-capacity 1
+        
+        echo "Waiting for instances to launch..."
+        sleep 60
+    
+    - name: Get EC2 instance IPs and create inventory
+      run: |
+        # Get Auto Scaling Group instances (retry logic)
+        for i in {1..5}; do
+          echo "Attempt $i: Getting Auto Scaling Group instances..."
+          INSTANCE_IDS=$(aws autoscaling describe-auto-scaling-groups \
+            --auto-scaling-group-names "${{ inputs.project_name }}-asg" \
+            --query 'AutoScalingGroups[0].Instances[?LifecycleState==`InService`].InstanceId' \
+            --output text)
+          
+          echo "Instance IDs: $INSTANCE_IDS"
+          
+          if [ -n "$INSTANCE_IDS" ]; then
+            break
+          fi
+          
+          echo "No running instances found, waiting 30 seconds..."
+          sleep 30
+        done
         
         if [ -z "$INSTANCE_IDS" ]; then
-          echo "No running instances found in Auto Scaling Group"
+          echo "No running instances found after retries"
           exit 1
         fi
         
