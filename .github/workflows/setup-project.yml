@@ -150,34 +150,53 @@ jobs:
         # Get Auto Scaling Group instances (retry logic)
         for i in {1..5}; do
           echo "Attempt $i: Getting Auto Scaling Group instances..."
+          
+          # First try InService instances
           INSTANCE_IDS=$(aws autoscaling describe-auto-scaling-groups \
             --auto-scaling-group-names "${{ inputs.project_name }}-asg" \
             --query 'AutoScalingGroups[0].Instances[?LifecycleState==`InService`].InstanceId' \
             --output text)
           
+          # If no InService instances, try all instances
+          if [ -z "$INSTANCE_IDS" ]; then
+            echo "No InService instances, checking all instances..."
+            INSTANCE_IDS=$(aws autoscaling describe-auto-scaling-groups \
+              --auto-scaling-group-names "${{ inputs.project_name }}-asg" \
+              --query 'AutoScalingGroups[0].Instances[].InstanceId' \
+              --output text)
+          fi
+          
           echo "Instance IDs: $INSTANCE_IDS"
           
+          # If we have instances, check if they're running
           if [ -n "$INSTANCE_IDS" ]; then
-            break
+            RUNNING_IPS=$(aws ec2 describe-instances \
+              --instance-ids $INSTANCE_IDS \
+              --query 'Reservations[].Instances[?State.Name==`running`].PublicIpAddress' \
+              --output text)
+            
+            echo "Running instance IPs: $RUNNING_IPS"
+            
+            if [ -n "$RUNNING_IPS" ]; then
+              # Store IPs for later use
+              echo "$RUNNING_IPS" > /tmp/instance_ips.txt
+              break
+            fi
           fi
           
           echo "No running instances found, waiting 30 seconds..."
           sleep 30
         done
         
-        if [ -z "$INSTANCE_IDS" ]; then
+        # Check if we found any running instances
+        if [ ! -f /tmp/instance_ips.txt ]; then
           echo "No running instances found after retries"
           exit 1
         fi
         
-        # Get public IPs of instances
-        echo "Getting public IP addresses..."
-        IPS=$(aws ec2 describe-instances \
-          --instance-ids $INSTANCE_IDS \
-          --query 'Reservations[].Instances[].PublicIpAddress' \
-          --output text)
-        
-        echo "Public IPs: $IPS"
+        # Read the IPs we found
+        IPS=$(cat /tmp/instance_ips.txt)
+        echo "Using IPs: $IPS"
         
         # Create dynamic inventory
         echo "[production]" > devops/ansible/dynamic-inventory
