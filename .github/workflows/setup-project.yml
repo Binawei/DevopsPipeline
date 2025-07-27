@@ -158,12 +158,16 @@ jobs:
         # Install Ansible
         pip install ansible
         
+        # Create SSH key file
+        echo "${{ secrets.EC2_SSH_KEY }}" > /tmp/ssh_key
+        chmod 600 /tmp/ssh_key
+        
         # Deploy application
         cd devops/ansible
         ansible-playbook -i dynamic-inventory deploy.yml \
           --extra-vars "image_tag=$IMAGE_TAG environment=production project_name=${{ inputs.project_name }} app_type=${{ inputs.app_type }}" \
-          --private-key <(echo "${{ secrets.EC2_SSH_KEY }}") \
-          -o StrictHostKeyChecking=no
+          --private-key /tmp/ssh_key \
+          --ssh-common-args='-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null'
     
     - name: Output deployment info
       run: |
