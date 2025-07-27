@@ -160,27 +160,46 @@ jobs:
     - name: Ensure Auto Scaling Group has instances
       if: env.SKIP_ASG_MANAGEMENT == 'false'
       run: |
-        echo "Setting ASG desired capacity to 1 to ensure instances are created"
+        echo "Checking for terminating instances..."
         
-        # Check current ASG status
-        echo "Current ASG status:"
-        aws autoscaling describe-auto-scaling-groups \
-          --auto-scaling-group-names "${{ inputs.project_name }}-asg" \
-          --query 'AutoScalingGroups[0].{MinSize:MinSize,MaxSize:MaxSize,DesiredCapacity:DesiredCapacity,Instances:Instances}'
+        # Wait for any terminating instances to complete
+        for i in {1..5}; do
+          TERMINATING_INSTANCES=$(aws autoscaling describe-auto-scaling-groups \
+            --auto-scaling-group-names "${{ inputs.project_name }}-asg" \
+            --query 'AutoScalingGroups[0].Instances[?LifecycleState==`Terminating`].InstanceId' \
+            --output text 2>/dev/null || echo "")
+          
+          if [ -z "$TERMINATING_INSTANCES" ] || [ "$TERMINATING_INSTANCES" = "None" ]; then
+            echo "No terminating instances found, proceeding..."
+            break
+          fi
+          
+          echo "Attempt $i: Found terminating instances: $TERMINATING_INSTANCES"
+          
+          if [ $i -eq 5 ]; then
+            echo "Instances stuck in terminating state. Forcing cleanup..."
+            # Set desired capacity to 0 first, then back to 1 to force refresh
+            aws autoscaling update-auto-scaling-group \
+              --auto-scaling-group-name "${{ inputs.project_name }}-asg" \
+              --desired-capacity 0 \
+              --min-size 0
+            sleep 30
+            break
+          fi
+          
+          echo "Waiting for termination to complete..."
+          sleep 30
+        done
+        
+        echo "Setting ASG desired capacity to 1 to ensure instances are created"
         
         aws autoscaling update-auto-scaling-group \
           --auto-scaling-group-name "${{ inputs.project_name }}-asg" \
           --min-size 1 \
           --desired-capacity 1
         
-        echo "Updated ASG status:"
-        aws autoscaling describe-auto-scaling-groups \
-          --auto-scaling-group-names "${{ inputs.project_name }}-asg" \
-          --query 'AutoScalingGroups[0].{MinSize:MinSize,MaxSize:MaxSize,DesiredCapacity:DesiredCapacity,Instances:Instances}'
-        
-        echo "Waiting for instances to launch and initialize..."
-        echo "This may take 3-5 minutes for instances to become InService"
-        sleep 180
+        echo "Updated ASG - waiting for new instances to launch..."
+        sleep 120
     
     - name: Get running EC2 instances
       run: |
@@ -216,6 +235,16 @@ jobs:
             if [ -n "$RUNNING_INSTANCES" ] && [ "$RUNNING_INSTANCES" != "None" ]; then
               echo "$RUNNING_INSTANCES" > /tmp/instance_ids.txt
               break
+            fi
+          else
+            # Check for Pending instances that might become InService soon
+            PENDING_INSTANCES=$(aws autoscaling describe-auto-scaling-groups \
+              --auto-scaling-group-names "${{ inputs.project_name }}-asg" \
+              --query 'AutoScalingGroups[0].Instances[?LifecycleState==`Pending`].InstanceId' \
+              --output text 2>/dev/null || echo "")
+            
+            if [ -n "$PENDING_INSTANCES" ] && [ "$PENDING_INSTANCES" != "None" ]; then
+              echo "Found Pending instances: $PENDING_INSTANCES - waiting for them to become InService"
             fi
           fi
           
