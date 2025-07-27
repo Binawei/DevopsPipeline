@@ -249,10 +249,36 @@ jobs:
         
         echo "Deploying to instances: $INSTANCE_IDS"
         
+        # Wait for instances to be ready for SSM
+        echo "Waiting for instances to be ready for Systems Manager..."
+        for instance_id in $INSTANCE_IDS; do
+          echo "Checking SSM status for instance: $instance_id"
+          for i in {1..10}; do
+            SSM_STATUS=$(aws ssm describe-instance-information \
+              --filters "Key=InstanceIds,Values=$instance_id" \
+              --query 'InstanceInformationList[0].PingStatus' \
+              --output text 2>/dev/null || echo "NotFound")
+            
+            echo "Attempt $i: SSM Status for $instance_id: $SSM_STATUS"
+            
+            if [ "$SSM_STATUS" = "Online" ]; then
+              echo "Instance $instance_id is ready for SSM"
+              break
+            fi
+            
+            if [ $i -eq 10 ]; then
+              echo "Instance $instance_id not ready for SSM after 10 attempts"
+              exit 1
+            fi
+            
+            sleep 30
+          done
+        done
+        
         # Deploy to each instance via SSM
         for instance_id in $INSTANCE_IDS; do
           echo "Deploying to instance: $instance_id"
-          aws ssm send-command \
+          COMMAND_ID=$(aws ssm send-command \
             --instance-ids "$instance_id" \
             --document-name "AWS-RunShellScript" \
             --parameters 'commands=[
@@ -262,7 +288,10 @@ jobs:
               "docker pull $ECR_REGISTRY/${{ inputs.project_name }}:$IMAGE_TAG",
               "docker run -d --name ${{ inputs.project_name }} -p 8080:8080 -e SPRING_PROFILES_ACTIVE=production -e PROJECT_NAME=${{ inputs.project_name }} -e AWS_REGION=${{ inputs.aws_region }} --restart unless-stopped $ECR_REGISTRY/${{ inputs.project_name }}:$IMAGE_TAG"
             ]' \
-            --comment "Deploy ${{ inputs.project_name }} via GitHub Actions"
+            --comment "Deploy ${{ inputs.project_name }} via GitHub Actions" \
+            --query 'Command.CommandId' --output text)
+          
+          echo "Command sent with ID: $COMMAND_ID"
         done
         
         echo "Deployment commands sent to all instances"
