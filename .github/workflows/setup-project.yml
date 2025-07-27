@@ -1,4 +1,4 @@
-name: Setup Project Pipeline
+name: Setup and Deploy Project
 
 on:
   workflow_call:
@@ -12,7 +12,19 @@ on:
       aws_region:
         required: false
         type: string
-        default: 'us-east-1'
+        default: "us-east-1"
+      enable_database:
+        required: false
+        type: boolean
+        default: false
+      database_type:
+        required: false
+        type: string
+        default: "postgres"
+      database_instance_class:
+        required: false
+        type: string
+        default: "db.t3.micro"
     secrets:
       AWS_ACCESS_KEY_ID:
         required: true
@@ -22,111 +34,106 @@ on:
         required: true
 
 jobs:
-  setup-and-deploy:
+  build-and-deploy:
     runs-on: ubuntu-latest
+    environment: production-approval
     
     steps:
-      - name: Checkout Project Code
-        uses: actions/checkout@v4
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Set up JDK 17
+      if: inputs.app_type == 'java-spring-boot'
+      uses: actions/setup-java@v4
+      with:
+        java-version: '17'
+        distribution: 'temurin'
+    
+    - name: Set up Node.js
+      if: inputs.app_type == 'react-frontend' || inputs.app_type == 'node-backend'
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+    
+    - name: Run tests (Java)
+      if: inputs.app_type == 'java-spring-boot'
+      run: ./mvnw clean test
+    
+    - name: Build application (Java)
+      if: inputs.app_type == 'java-spring-boot'
+      run: ./mvnw clean package -DskipTests
+    
+    - name: Install dependencies (Node)
+      if: inputs.app_type == 'react-frontend' || inputs.app_type == 'node-backend'
+      run: npm ci
+    
+    - name: Run tests (Node)
+      if: inputs.app_type == 'react-frontend' || inputs.app_type == 'node-backend'
+      run: npm test -- --coverage --watchAll=false
+    
+    - name: Build application (React)
+      if: inputs.app_type == 'react-frontend'
+      run: npm run build
+    
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ inputs.aws_region }}
+    
+    - name: Login to Amazon ECR
+      id: login-ecr
+      uses: aws-actions/amazon-ecr-login@v2
+    
+    - name: Build and push Docker image
+      env:
+        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        IMAGE_TAG: ${{ github.sha }}
+      run: |
+        # Create ECR repository if it doesn't exist
+        aws ecr describe-repositories --repository-names ${{ inputs.project_name }} || aws ecr create-repository --repository-name ${{ inputs.project_name }}
         
-      - name: Checkout Pipeline Templates
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ github.repository_owner }}/DevOpsPipeline
-          ref: main
-          path: pipeline-templates
-          
-      - name: Configure AWS Credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ inputs.aws_region }}
-          
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
+        # Build and push image
+        docker build -t $ECR_REGISTRY/${{ inputs.project_name }}:$IMAGE_TAG .
+        docker tag $ECR_REGISTRY/${{ inputs.project_name }}:$IMAGE_TAG $ECR_REGISTRY/${{ inputs.project_name }}:latest
+        docker push $ECR_REGISTRY/${{ inputs.project_name }}:$IMAGE_TAG
+        docker push $ECR_REGISTRY/${{ inputs.project_name }}:latest
+    
+    - name: Deploy infrastructure with Terraform
+      env:
+        TF_VAR_project_name: ${{ inputs.project_name }}
+        TF_VAR_app_type: ${{ inputs.app_type }}
+        TF_VAR_aws_region: ${{ inputs.aws_region }}
+        TF_VAR_enable_database: ${{ inputs.enable_database }}
+        TF_VAR_database_type: ${{ inputs.database_type }}
+        TF_VAR_database_instance_class: ${{ inputs.database_instance_class }}
+      run: |
+        cd devops/terraform
+        terraform init
+        terraform plan
+        terraform apply -auto-approve
         
-      - name: Check if Infrastructure Exists
-        id: check-infra
-        run: |
-          if aws ecr describe-repositories --repository-names ${{ inputs.project_name }} 2>/dev/null; then
-            echo "exists=true" >> $GITHUB_OUTPUT
-          else
-            echo "exists=false" >> $GITHUB_OUTPUT
-          fi
-          
-      - name: Create Infrastructure
-        if: steps.check-infra.outputs.exists == 'false'
-        run: |
-          # Copy Terraform templates
-          cp -r pipeline-templates/templates/common/terraform/* .
-          
-          # Generate terraform.tfvars
-          cat > terraform.tfvars << EOF
-          project_name = "${{ inputs.project_name }}"
-          app_type = "${{ inputs.app_type }}"
-          aws_region = "${{ inputs.aws_region }}"
-          instance_type = "t3.medium"
-          min_instances = 2
-          max_instances = 6
-          EOF
-          
-          # Deploy infrastructure
-          terraform init
-          terraform apply -auto-approve
-          
-      - name: Login to ECR
-        id: login-ecr
-        uses: aws-actions/amazon-ecr-login@v2
+        # Get outputs
+        echo "LOAD_BALANCER_DNS=$(terraform output -raw load_balancer_dns)" >> $GITHUB_ENV
+        echo "ECR_REPOSITORY_URL=$(terraform output -raw ecr_repository_url)" >> $GITHUB_ENV
+    
+    - name: Deploy to EC2 with Ansible
+      env:
+        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        IMAGE_TAG: ${{ github.sha }}
+      run: |
+        # Install Ansible
+        pip install ansible
         
-      - name: Build and Push Docker Image
-        env:
-          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-          IMAGE_TAG: ${{ github.sha }}
-        run: |
-          docker build -t $ECR_REGISTRY/${{ inputs.project_name }}:$IMAGE_TAG .
-          docker push $ECR_REGISTRY/${{ inputs.project_name }}:$IMAGE_TAG
-          
-      - name: Setup SSH Key
-        run: |
-          mkdir -p ~/.ssh
-          echo "${{ secrets.EC2_SSH_KEY }}" > ~/.ssh/id_rsa
-          chmod 600 ~/.ssh/id_rsa
-          
-      - name: Install Ansible
-        run: pip install ansible boto3
-        
-      - name: Get EC2 Instances
-        id: get-instances
-        run: |
-          ASG_NAME="${{ inputs.project_name }}-asg"
-          INSTANCES=$(aws ec2 describe-instances \
-            --filters "Name=tag:aws:autoscaling:groupName,Values=$ASG_NAME" "Name=instance-state-name,Values=running" \
-            --query 'Reservations[].Instances[].PublicIpAddress' \
-            --output text)
-          echo "instances=$INSTANCES" >> $GITHUB_OUTPUT
-          
-      - name: Deploy Application
-        env:
-          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-          IMAGE_TAG: ${{ github.sha }}
-        run: |
-          # Create temporary inventory
-          cat > inventory << EOF
-          [servers]
-          ${{ steps.get-instances.outputs.instances }} ansible_user=ec2-user
-          
-          [all:vars]
-          project_name=${{ inputs.project_name }}
-          app_type=${{ inputs.app_type }}
-          aws_region=${{ inputs.aws_region }}
-          EOF
-          
-          # Copy and run deployment playbook
-          cp pipeline-templates/templates/common/ansible/deploy.yml .
-          
-          ansible-playbook -i inventory deploy.yml \
-            -e project_name=${{ inputs.project_name }} \
-            -e app_type=${{ inputs.app_type }} \
-            -e image_tag=$IMAGE_TAG \
-            -e aws_region=${{ inputs.aws_region }}
+        # Deploy application
+        cd devops/ansible
+        ansible-playbook -i prod-inventory deploy.yml \
+          --extra-vars "image_tag=$IMAGE_TAG environment=production project_name=${{ inputs.project_name }} app_type=${{ inputs.app_type }}" \
+          --private-key <(echo "${{ secrets.EC2_SSH_KEY }}")
+    
+    - name: Output deployment info
+      run: |
+        echo "🎉 Deployment completed successfully!"
+        echo "🌐 Application URL: http://${{ env.LOAD_BALANCER_DNS }}"
+        echo "📦 Docker Image: ${{ env.ECR_REPOSITORY_URL }}:${{ github.sha }}"
