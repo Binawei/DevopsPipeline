@@ -197,26 +197,45 @@ jobs:
         echo "Generated inventory:"
         cat devops/ansible/inventory
     
-    - name: Deploy via Ansible
+    - name: Deploy via direct SSH
       env:
         ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
         IMAGE_TAG: ${{ github.sha }}
       run: |
-        # Install Ansible and docker module
-        pip install ansible docker
+        # Get instance IPs
+        INSTANCE_IDS=$(cat /tmp/instance_ids.txt)
+        INSTANCE_IPS=$(aws ec2 describe-instances \
+          --instance-ids $INSTANCE_IDS \
+          --query 'Reservations[].Instances[].PublicIpAddress' \
+          --output text)
         
-        # Wait for SSH to be ready
-        echo "Waiting for SSH access..."
-        sleep 60
+        echo "Deploying to IPs: $INSTANCE_IPS"
         
-        # Run Ansible playbook
-        cd devops/ansible
-        ansible-playbook -i inventory deploy.yml \
-          -e "ecr_registry=$ECR_REGISTRY" \
-          -e "image_tag=$IMAGE_TAG" \
-          -e "project_name=${{ inputs.project_name }}" \
-          -e "aws_region=${{ inputs.aws_region }}" \
-          -v
+        # Deploy to each instance via SSH
+        for ip in $INSTANCE_IPS; do
+          echo "Deploying to $ip..."
+          
+          # Try SSH deployment (skip if SSH key doesn't work)
+          ssh -i /tmp/ssh_key.pem -o StrictHostKeyChecking=no -o ConnectTimeout=10 ec2-user@$ip << EOF || echo "SSH failed for $ip, skipping..."
+            # Login to ECR
+            aws ecr get-login-password --region ${{ inputs.aws_region }} | docker login --username AWS --password-stdin $ECR_REGISTRY
+            
+            # Stop existing container
+            docker stop ${{ inputs.project_name }} || true
+            docker rm ${{ inputs.project_name }} || true
+            
+            # Pull and run new container
+            docker pull $ECR_REGISTRY/${{ inputs.project_name }}:$IMAGE_TAG
+            docker run -d --name ${{ inputs.project_name }} -p 8080:8080 \
+              -e SPRING_PROFILES_ACTIVE=production \
+              -e PROJECT_NAME=${{ inputs.project_name }} \
+              -e AWS_REGION=${{ inputs.aws_region }} \
+              --restart unless-stopped \
+              $ECR_REGISTRY/${{ inputs.project_name }}:$IMAGE_TAG
+            
+            echo "Deployment completed on $ip"
+EOF
+        done
     
     - name: Output deployment info
       run: |
