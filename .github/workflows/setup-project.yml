@@ -133,35 +133,13 @@ jobs:
         
         echo "Existing instances: $EXISTING_INSTANCES"
         
-        # Check if any existing instances are SSM-ready
-        SSM_READY_COUNT=0
         if [ -n "$EXISTING_INSTANCES" ] && [ "$EXISTING_INSTANCES" != "None" ]; then
-          for instance_id in $EXISTING_INSTANCES; do
-            SSM_STATUS=$(aws ssm describe-instance-information \
-              --filters "Key=InstanceIds,Values=$instance_id" \
-              --query 'InstanceInformationList[0].PingStatus' \
-              --output text 2>/dev/null || echo "NotFound")
-            if [ "$SSM_STATUS" = "Online" ]; then
-              SSM_READY_COUNT=$((SSM_READY_COUNT + 1))
-            fi
-          done
-        fi
-        
-        echo "SSM-ready instances: $SSM_READY_COUNT"
-        
-        if [ $SSM_READY_COUNT -gt 0 ]; then
-          echo "Found SSM-ready instances, skipping instance creation"
-          echo "SKIP_INSTANCE_CREATION=true" >> $GITHUB_ENV
+          echo "Found existing instances, will use them for deployment"
         else
-          echo "No SSM-ready instances, will create new instances"
-          echo "SKIP_INSTANCE_CREATION=false" >> $GITHUB_ENV
+          echo "No existing instances, Terraform will create new ones"
         fi
     
-    - name: Ensure EC2 instances exist
-      if: env.SKIP_INSTANCE_CREATION == 'false'
-      run: |
-        echo "Terraform will create direct EC2 instances (bypassing ASG issues)"
-        echo "Instances will be created via Terraform apply step"
+
     
     - name: Get running EC2 instances
       run: |
@@ -223,8 +201,8 @@ jobs:
         ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
         IMAGE_TAG: ${{ github.sha }}
       run: |
-        # Install Ansible
-        pip install ansible
+        # Install Ansible and docker module
+        pip install ansible docker
         
         # Wait for SSH to be ready
         echo "Waiting for SSH access..."
