@@ -31,7 +31,7 @@ on:
       AWS_SECRET_ACCESS_KEY:
         required: true
       EC2_SSH_KEY:
-        required: true
+        required: false
 
 jobs:
   build-and-deploy:
@@ -123,7 +123,26 @@ jobs:
         echo "LOAD_BALANCER_DNS=$(terraform output -raw load_balancer_dns)" >> $GITHUB_ENV
         echo "ECR_REPOSITORY_URL=$(terraform output -raw ecr_repository_url)" >> $GITHUB_ENV
     
+    - name: Check if instances already exist
+      run: |
+        # Check if there are already running instances
+        EXISTING_INSTANCES=$(aws autoscaling describe-auto-scaling-groups \
+          --auto-scaling-group-names "${{ inputs.project_name }}-asg" \
+          --query 'AutoScalingGroups[0].Instances[?LifecycleState==`InService`].InstanceId' \
+          --output text)
+        
+        echo "Existing instances: $EXISTING_INSTANCES"
+        
+        if [ -n "$EXISTING_INSTANCES" ]; then
+          echo "Instances already exist, skipping ASG management"
+          echo "SKIP_ASG_MANAGEMENT=true" >> $GITHUB_ENV
+        else
+          echo "No existing instances, will manage ASG"
+          echo "SKIP_ASG_MANAGEMENT=false" >> $GITHUB_ENV
+        fi
+    
     - name: Ensure Auto Scaling Group has instances
+      if: env.SKIP_ASG_MANAGEMENT == 'false'
       run: |
         # Check current Auto Scaling Group status
         echo "Checking Auto Scaling Group status..."
@@ -214,24 +233,39 @@ jobs:
         echo "Generated inventory:"
         cat devops/ansible/dynamic-inventory
     
-    - name: Deploy to EC2 with Ansible
+    - name: Deploy to EC2 via Systems Manager
       env:
         ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
         IMAGE_TAG: ${{ github.sha }}
       run: |
-        # Install Ansible
-        pip install ansible
+        # Read instance IPs
+        IPS=$(cat /tmp/instance_ips.txt)
         
-        # Create SSH key file
-        echo "${{ secrets.EC2_SSH_KEY }}" > /tmp/ssh_key
-        chmod 600 /tmp/ssh_key
+        # Get instance IDs from IPs
+        INSTANCE_IDS=$(aws ec2 describe-instances \
+          --filters "Name=ip-address,Values=$(echo $IPS | tr ' ' ',')" "Name=instance-state-name,Values=running" \
+          --query 'Reservations[].Instances[].InstanceId' \
+          --output text)
         
-        # Deploy application
-        cd devops/ansible
-        ansible-playbook -i dynamic-inventory deploy.yml \
-          --extra-vars "image_tag=$IMAGE_TAG environment=production project_name=${{ inputs.project_name }} app_type=${{ inputs.app_type }}" \
-          --private-key /tmp/ssh_key \
-          --ssh-common-args='-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null'
+        echo "Deploying to instances: $INSTANCE_IDS"
+        
+        # Deploy to each instance via SSM
+        for instance_id in $INSTANCE_IDS; do
+          echo "Deploying to instance: $instance_id"
+          aws ssm send-command \
+            --instance-ids "$instance_id" \
+            --document-name "AWS-RunShellScript" \
+            --parameters 'commands=[
+              "aws ecr get-login-password --region ${{ inputs.aws_region }} | docker login --username AWS --password-stdin $ECR_REGISTRY",
+              "docker stop ${{ inputs.project_name }} || true",
+              "docker rm ${{ inputs.project_name }} || true",
+              "docker pull $ECR_REGISTRY/${{ inputs.project_name }}:$IMAGE_TAG",
+              "docker run -d --name ${{ inputs.project_name }} -p 8080:8080 -e SPRING_PROFILES_ACTIVE=production -e PROJECT_NAME=${{ inputs.project_name }} -e AWS_REGION=${{ inputs.aws_region }} --restart unless-stopped $ECR_REGISTRY/${{ inputs.project_name }}:$IMAGE_TAG"
+            ]' \
+            --comment "Deploy ${{ inputs.project_name }} via GitHub Actions"
+        done
+        
+        echo "Deployment commands sent to all instances"
     
     - name: Output deployment info
       run: |
