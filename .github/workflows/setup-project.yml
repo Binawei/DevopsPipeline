@@ -134,10 +134,13 @@ jobs:
         
         echo "ASG Status (Min/Max/Desired): $ASG_STATUS"
         
-        # Ensure desired capacity is at least 1
+        # Get current min size and set desired capacity accordingly
+        MIN_SIZE=$(echo "$ASG_STATUS" | cut -f1)
+        echo "Setting desired capacity to minimum size: $MIN_SIZE"
+        
         aws autoscaling update-auto-scaling-group \
           --auto-scaling-group-name "${{ inputs.project_name }}-asg" \
-          --desired-capacity 1
+          --desired-capacity $MIN_SIZE
         
         echo "Waiting for instances to launch..."
         sleep 60
