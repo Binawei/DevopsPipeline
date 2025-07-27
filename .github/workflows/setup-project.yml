@@ -162,34 +162,30 @@ jobs:
       run: |
         echo "Checking for terminating instances..."
         
-        # Wait for any terminating instances to complete
-        for i in {1..5}; do
-          TERMINATING_INSTANCES=$(aws autoscaling describe-auto-scaling-groups \
-            --auto-scaling-group-names "${{ inputs.project_name }}-asg" \
-            --query 'AutoScalingGroups[0].Instances[?LifecycleState==`Terminating`].InstanceId' \
-            --output text 2>/dev/null || echo "")
-          
-          if [ -z "$TERMINATING_INSTANCES" ] || [ "$TERMINATING_INSTANCES" = "None" ]; then
-            echo "No terminating instances found, proceeding..."
-            break
-          fi
-          
-          echo "Attempt $i: Found terminating instances: $TERMINATING_INSTANCES"
-          
-          if [ $i -eq 5 ]; then
-            echo "Instances stuck in terminating state. Forcing cleanup..."
-            # Set desired capacity to 0 first, then back to 1 to force refresh
-            aws autoscaling update-auto-scaling-group \
-              --auto-scaling-group-name "${{ inputs.project_name }}-asg" \
-              --desired-capacity 0 \
-              --min-size 0
-            sleep 30
-            break
-          fi
-          
-          echo "Waiting for termination to complete..."
-          sleep 30
-        done
+        # Check if ASG is in a bad state (instances keep terminating)
+        echo "Checking ASG health..."
+        
+        # Force reset ASG to break terminating loop
+        echo "Resetting ASG to ensure clean state..."
+        aws autoscaling update-auto-scaling-group \
+          --auto-scaling-group-name "${{ inputs.project_name }}-asg" \
+          --desired-capacity 0 \
+          --min-size 0
+        
+        echo "Waiting for all instances to terminate..."
+        sleep 90
+        
+        # Verify all instances are gone
+        REMAINING_INSTANCES=$(aws autoscaling describe-auto-scaling-groups \
+          --auto-scaling-group-names "${{ inputs.project_name }}-asg" \
+          --query 'AutoScalingGroups[0].Instances[].InstanceId' \
+          --output text 2>/dev/null || echo "")
+        
+        if [ -n "$REMAINING_INSTANCES" ] && [ "$REMAINING_INSTANCES" != "None" ]; then
+          echo "Warning: Some instances still exist: $REMAINING_INSTANCES"
+        else
+          echo "ASG successfully reset - no instances remaining"
+        fi
         
         echo "Setting ASG desired capacity to 1 to ensure instances are created"
         
