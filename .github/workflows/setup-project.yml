@@ -125,10 +125,10 @@ jobs:
     
     - name: Check if instances already exist
       run: |
-        # Check if there are already running instances
-        EXISTING_INSTANCES=$(aws autoscaling describe-auto-scaling-groups \
-          --auto-scaling-group-names "${{ inputs.project_name }}-asg" \
-          --query 'AutoScalingGroups[0].Instances[?LifecycleState==`InService`].InstanceId' \
+        # Check for existing EC2 instances with our tag
+        EXISTING_INSTANCES=$(aws ec2 describe-instances \
+          --filters "Name=tag:Name,Values=${{ inputs.project_name }}-instance" "Name=instance-state-name,Values=running" \
+          --query 'Reservations[].Instances[].InstanceId' \
           --output text 2>/dev/null || echo "")
         
         echo "Existing instances: $EXISTING_INSTANCES"
@@ -150,102 +150,40 @@ jobs:
         echo "SSM-ready instances: $SSM_READY_COUNT"
         
         if [ $SSM_READY_COUNT -gt 0 ]; then
-          echo "Found SSM-ready instances, skipping ASG management"
-          echo "SKIP_ASG_MANAGEMENT=true" >> $GITHUB_ENV
+          echo "Found SSM-ready instances, skipping instance creation"
+          echo "SKIP_INSTANCE_CREATION=true" >> $GITHUB_ENV
         else
-          echo "No SSM-ready instances, will manage ASG"
-          echo "SKIP_ASG_MANAGEMENT=false" >> $GITHUB_ENV
+          echo "No SSM-ready instances, will create new instances"
+          echo "SKIP_INSTANCE_CREATION=false" >> $GITHUB_ENV
         fi
     
-    - name: Ensure Auto Scaling Group has instances
-      if: env.SKIP_ASG_MANAGEMENT == 'false'
+    - name: Ensure EC2 instances exist
+      if: env.SKIP_INSTANCE_CREATION == 'false'
       run: |
-        echo "Checking for terminating instances..."
-        
-        # Check if ASG is in a bad state (instances keep terminating)
-        echo "Checking ASG health..."
-        
-        # Force reset ASG to break terminating loop
-        echo "Resetting ASG to ensure clean state..."
-        aws autoscaling update-auto-scaling-group \
-          --auto-scaling-group-name "${{ inputs.project_name }}-asg" \
-          --desired-capacity 0 \
-          --min-size 0
-        
-        echo "Waiting for all instances to terminate..."
-        sleep 90
-        
-        # Verify all instances are gone
-        REMAINING_INSTANCES=$(aws autoscaling describe-auto-scaling-groups \
-          --auto-scaling-group-names "${{ inputs.project_name }}-asg" \
-          --query 'AutoScalingGroups[0].Instances[].InstanceId' \
-          --output text 2>/dev/null || echo "")
-        
-        if [ -n "$REMAINING_INSTANCES" ] && [ "$REMAINING_INSTANCES" != "None" ]; then
-          echo "Warning: Some instances still exist: $REMAINING_INSTANCES"
-        else
-          echo "ASG successfully reset - no instances remaining"
-        fi
-        
-        echo "Setting ASG desired capacity to 1 to ensure instances are created"
-        
-        aws autoscaling update-auto-scaling-group \
-          --auto-scaling-group-name "${{ inputs.project_name }}-asg" \
-          --min-size 1 \
-          --desired-capacity 1
-        
-        echo "Updated ASG - waiting for new instances to launch..."
-        sleep 120
+        echo "Terraform will create direct EC2 instances (bypassing ASG issues)"
+        echo "Instances will be created via Terraform apply step"
     
     - name: Get running EC2 instances
       run: |
-        # Wait for instances to be created and become InService
+        # Wait for direct EC2 instances to be running
         for i in {1..10}; do
-          echo "Attempt $i: Checking ASG instances..."
+          echo "Attempt $i: Checking direct EC2 instances..."
           
-          # Get all instances from ASG (any lifecycle state)
-          ALL_INSTANCES=$(aws autoscaling describe-auto-scaling-groups \
-            --auto-scaling-group-names "${{ inputs.project_name }}-asg" \
-            --query 'AutoScalingGroups[0].Instances[].{Id:InstanceId,State:LifecycleState}' \
+          # Get instances by tag
+          RUNNING_INSTANCES=$(aws ec2 describe-instances \
+            --filters "Name=tag:Name,Values=${{ inputs.project_name }}-instance" "Name=instance-state-name,Values=running" \
+            --query 'Reservations[].Instances[].InstanceId' \
             --output text 2>/dev/null || echo "")
           
-          echo "All ASG instances: $ALL_INSTANCES"
+          echo "Running instances: $RUNNING_INSTANCES"
           
-          # Get InService instances
-          INSERVICE_INSTANCES=$(aws autoscaling describe-auto-scaling-groups \
-            --auto-scaling-group-names "${{ inputs.project_name }}-asg" \
-            --query 'AutoScalingGroups[0].Instances[?LifecycleState==`InService`].InstanceId' \
-            --output text 2>/dev/null || echo "")
-          
-          echo "InService instances: $INSERVICE_INSTANCES"
-          
-          if [ -n "$INSERVICE_INSTANCES" ] && [ "$INSERVICE_INSTANCES" != "None" ]; then
-            # Verify instances are actually running in EC2
-            RUNNING_INSTANCES=$(aws ec2 describe-instances \
-              --instance-ids $INSERVICE_INSTANCES \
-              --query 'Reservations[].Instances[?State.Name==`running`].InstanceId' \
-              --output text)
-            
-            echo "Running instances: $RUNNING_INSTANCES"
-            
-            if [ -n "$RUNNING_INSTANCES" ] && [ "$RUNNING_INSTANCES" != "None" ]; then
-              echo "$RUNNING_INSTANCES" > /tmp/instance_ids.txt
-              break
-            fi
-          else
-            # Check for Pending instances that might become InService soon
-            PENDING_INSTANCES=$(aws autoscaling describe-auto-scaling-groups \
-              --auto-scaling-group-names "${{ inputs.project_name }}-asg" \
-              --query 'AutoScalingGroups[0].Instances[?LifecycleState==`Pending`].InstanceId' \
-              --output text 2>/dev/null || echo "")
-            
-            if [ -n "$PENDING_INSTANCES" ] && [ "$PENDING_INSTANCES" != "None" ]; then
-              echo "Found Pending instances: $PENDING_INSTANCES - waiting for them to become InService"
-            fi
+          if [ -n "$RUNNING_INSTANCES" ] && [ "$RUNNING_INSTANCES" != "None" ]; then
+            echo "$RUNNING_INSTANCES" > /tmp/instance_ids.txt
+            break
           fi
           
-          echo "Waiting for instances to become InService and running..."
-          sleep 60
+          echo "Waiting for instances to be running..."
+          sleep 30
         done
         
         if [ ! -f /tmp/instance_ids.txt ]; then
