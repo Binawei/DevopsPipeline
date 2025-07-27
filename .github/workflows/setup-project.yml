@@ -193,79 +193,51 @@ jobs:
         
         echo "Found running instances: $(cat /tmp/instance_ids.txt)"
     
-    - name: Deploy to EC2 via Systems Manager
+    - name: Setup SSH key for Ansible
+      run: |
+        # Get SSH private key from Terraform output
+        cd devops/terraform
+        terraform output -raw ssh_private_key > /tmp/ssh_key.pem
+        chmod 600 /tmp/ssh_key.pem
+        
+        # Get instance IPs
+        INSTANCE_IDS=$(cat /tmp/instance_ids.txt)
+        INSTANCE_IPS=$(aws ec2 describe-instances \
+          --instance-ids $INSTANCE_IDS \
+          --query 'Reservations[].Instances[].PublicIpAddress' \
+          --output text)
+        
+        echo "Instance IPs: $INSTANCE_IPS"
+        
+        # Create Ansible inventory
+        echo "[production]" > devops/ansible/inventory
+        for ip in $INSTANCE_IPS; do
+          echo "$ip ansible_user=ec2-user ansible_ssh_private_key_file=/tmp/ssh_key.pem ansible_ssh_common_args='-o StrictHostKeyChecking=no'" >> devops/ansible/inventory
+        done
+        
+        echo "Generated inventory:"
+        cat devops/ansible/inventory
+    
+    - name: Deploy via Ansible
       env:
         ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
         IMAGE_TAG: ${{ github.sha }}
       run: |
-        # Read instance IDs
-        INSTANCE_IDS=$(cat /tmp/instance_ids.txt)
-        echo "Deploying to instances: $INSTANCE_IDS"
+        # Install Ansible
+        pip install ansible
         
-        # Wait for instances to be ready for SSM
-        echo "Waiting for instances to be ready for Systems Manager..."
-        for instance_id in $INSTANCE_IDS; do
-          echo "Checking SSM status for instance: $instance_id"
-          for i in {1..10}; do
-            SSM_STATUS=$(aws ssm describe-instance-information \
-              --filters "Key=InstanceIds,Values=$instance_id" \
-              --query 'InstanceInformationList[0].PingStatus' \
-              --output text 2>/dev/null || echo "NotFound")
-            
-            echo "Attempt $i: SSM Status for $instance_id: $SSM_STATUS"
-            
-            if [ "$SSM_STATUS" = "Online" ]; then
-              echo "Instance $instance_id is ready for SSM"
-              break
-            fi
-            
-            if [ $i -eq 10 ]; then
-              echo "Instance $instance_id not ready for SSM after 10 attempts. Trying manual restart..."
-              # Try to restart SSM agent
-              aws ssm send-command \
-                --instance-ids "$instance_id" \
-                --document-name "AWS-RunShellScript" \
-                --parameters 'commands=["sudo systemctl restart amazon-ssm-agent"]' \
-                --comment "Restart SSM agent" || echo "Failed to restart SSM agent"
-              sleep 60
-            fi
-            
-            sleep 30
-          done
-        done
-        
-        # Deploy to each instance via SSM
-        for instance_id in $INSTANCE_IDS; do
-          echo "Deploying to instance: $instance_id"
-          COMMAND_ID=$(aws ssm send-command \
-            --instance-ids "$instance_id" \
-            --document-name "AWS-RunShellScript" \
-            --parameters 'commands=[
-              "aws ecr get-login-password --region ${{ inputs.aws_region }} | docker login --username AWS --password-stdin $ECR_REGISTRY",
-              "docker stop ${{ inputs.project_name }} || true",
-              "docker rm ${{ inputs.project_name }} || true",
-              "docker pull $ECR_REGISTRY/${{ inputs.project_name }}:$IMAGE_TAG",
-              "docker run -d --name ${{ inputs.project_name }} -p 8080:8080 -e SPRING_PROFILES_ACTIVE=production -e PROJECT_NAME=${{ inputs.project_name }} -e AWS_REGION=${{ inputs.aws_region }} --restart unless-stopped $ECR_REGISTRY/${{ inputs.project_name }}:$IMAGE_TAG"
-            ]' \
-            --comment "Deploy ${{ inputs.project_name }} via GitHub Actions" \
-            --query 'Command.CommandId' --output text)
-          
-          echo "Command sent with ID: $COMMAND_ID"
-        done
-        
-        echo "Deployment commands sent to all instances"
-        
-        # Wait a bit for deployment to complete
+        # Wait for SSH to be ready
+        echo "Waiting for SSH access..."
         sleep 60
         
-        # Attach instances to target group after successful deployment
-        echo "Attaching instances to load balancer target group..."
-        for instance_id in $INSTANCE_IDS; do
-          aws elbv2 register-targets \
-            --target-group-arn $(aws elbv2 describe-target-groups --names "${{ inputs.project_name }}-tg" --query 'TargetGroups[0].TargetGroupArn' --output text) \
-            --targets Id=$instance_id,Port=8080
-          echo "Registered $instance_id with target group"
-        done
+        # Run Ansible playbook
+        cd devops/ansible
+        ansible-playbook -i inventory deploy.yml \
+          -e "ecr_registry=$ECR_REGISTRY" \
+          -e "image_tag=$IMAGE_TAG" \
+          -e "project_name=${{ inputs.project_name }}" \
+          -e "aws_region=${{ inputs.aws_region }}" \
+          -v
     
     - name: Output deployment info
       run: |
