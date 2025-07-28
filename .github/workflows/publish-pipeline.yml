@@ -23,7 +23,7 @@ jobs:
           
       - name: Package Pipeline
         run: |
-          tar -czf devops-pipeline.tar.gz templates/ pipeline-config.yml setup.py docs/ *.md
+          tar -czf devops-pipeline.tar.gz templates/ docs/ *.md
           
       - name: Upload to GitHub Packages
         uses: actions/upload-artifact@v4
