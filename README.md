@@ -177,6 +177,102 @@ mindmap
 - React (npm, Jest)
 - Node.js (npm, Jest)
 
+## 📋 Step-by-Step Pipeline Flow
+
+### Phase 1: Developer Workflow
+**1. Code Development**
+- Developer writes code and commits changes
+- Code is pushed to GitHub repository
+- Triggers GitHub Actions workflow automatically
+
+### Phase 2: CI/CD Pipeline (GitHub Actions)
+**2. Build Stage**
+- Downloads source code from repository
+- Installs dependencies (Maven for Java, npm for React/Node.js)
+- Compiles application code
+- Creates build artifacts
+
+**3. Test Stage**
+- Runs unit tests (JUnit for Java, Jest for React/Node.js)
+- Generates test reports and coverage
+- Fails pipeline if tests don't pass
+- Ensures code quality before deployment
+
+**4. Docker Build**
+- Creates Docker image from application
+- Tags image with commit SHA and version
+- Optimizes image size and security
+- Prepares for containerized deployment
+
+**5. Manual Approval Gate**
+- Pipeline pauses for production deployments
+- Requires manual approval from authorized team member
+- Prevents accidental production releases
+- Allows final review before infrastructure changes
+
+### Phase 3: Infrastructure Provisioning
+**6. Container Registry (ECR)**
+- Pushes Docker image to Amazon ECR
+- Stores images securely with encryption
+- Manages image versions and lifecycle
+- Provides secure access for deployment
+
+**7. Terraform Infrastructure**
+- Reads infrastructure configuration files
+- Creates/updates AWS resources:
+  - VPC with public/private subnets
+  - Application Load Balancer for traffic distribution
+  - Auto Scaling Groups (2-6 EC2 instances)
+  - RDS database (PostgreSQL/MySQL)
+  - Security Groups for network access
+  - CloudWatch for monitoring
+  - Parameter Store for secrets
+
+### Phase 4: Application Deployment
+**8. Ansible Configuration**
+- Connects to provisioned EC2 instances
+- Installs Docker and required software
+- Configures system settings and security
+- Sets up monitoring and logging agents
+
+**9. Application Deployment**
+- Pulls Docker image from ECR
+- Stops old application containers (if any)
+- Starts new containers with zero downtime
+- Configures load balancer health checks
+
+**10. Health Validation**
+- Performs application health checks
+- Validates database connectivity
+- Confirms all services are running
+- Monitors application metrics
+
+### Phase 5: Post-Deployment
+**11. Monitoring Setup**
+- CloudWatch collects application logs
+- Metrics dashboards become available
+- Alerts configured for critical issues
+- Performance monitoring activated
+
+**12. Rollback Capability**
+- Manual rollback available if issues detected
+- Can revert to previous application version
+- Infrastructure rollback for critical problems
+- Database rollback with backup restoration
+
+### 🔄 Continuous Operation
+- **Auto Scaling**: EC2 instances scale based on traffic
+- **Health Monitoring**: Automatic replacement of unhealthy instances
+- **Security Updates**: Regular patching through Ansible
+- **Backup Management**: Automated database and application backups
+
+## 🚨 Failure Handling
+- **Build Failures**: Pipeline stops, notifications sent to team
+- **Test Failures**: Deployment blocked until tests pass
+- **Infrastructure Issues**: Terraform rollback, manual intervention
+- **Deployment Problems**: Automatic health check failures trigger alerts
+- **Manual Rollback**: One-click rollback to previous stable version
+
 ## 📖 Documentation
 - [Complete Beginner Guide](docs/BEGINNER_GUIDE.md) - Step-by-step setup
 - [Advanced Configuration](docs/ADVANCED.md) - Customization options
