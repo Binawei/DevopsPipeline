@@ -172,12 +172,15 @@ jobs:
     - name: Setup SSH key for Ansible
       run: |
         # Use GitHub secret SSH key for existing instances
-        if [ -n "${{ secrets.EC2_SSH_KEY }}" ]; then
-          echo "Using GitHub secret SSH key"
-          echo "${{ secrets.EC2_SSH_KEY }}" > /tmp/ssh_key.pem
-          chmod 600 /tmp/ssh_key.pem
+        echo "Setting up SSH key for deployment..."
+        echo "${{ secrets.EC2_SSH_KEY }}" > /tmp/ssh_key.pem
+        chmod 600 /tmp/ssh_key.pem
+        
+        # Verify key format
+        if head -1 /tmp/ssh_key.pem | grep -q "BEGIN"; then
+          echo "SSH key format looks correct"
         else
-          echo "Using Terraform-generated SSH key"
+          echo "SSH key format issue, trying Terraform key as fallback"
           cd devops/terraform
           terraform output -raw ssh_private_key > /tmp/ssh_key.pem
           chmod 600 /tmp/ssh_key.pem

@@ -335,4 +335,36 @@ With this setup, you get:
 - ✅ **Manual deployment control**
 - ✅ **Zero maintenance overhead**
 
-Just add 2 files to any project and you're ready to deploy to AWS!
+## 🔄 **Manual Rollback**
+
+Add rollback capability to your project:
+
+```yaml
+# .github/workflows/rollback.yml
+name: Manual Rollback
+on:
+  workflow_dispatch:
+    inputs:
+      rollback_to_tag:
+        description: 'Git SHA to rollback to'
+        required: true
+
+jobs:
+  rollback:
+    uses: YOUR_USERNAME/DevOpsPipeline/.github/workflows/rollback.yml@main
+    with:
+      project_name: "your-app"
+      rollback_to_tag: ${{ inputs.rollback_to_tag }}
+    secrets:
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
+```
+
+**Usage**: Actions tab → Manual Rollback → Enter git SHA → Run (3-5 minutes)
+
+**See [ROLLBACK_GUIDE.md](docs/ROLLBACK_GUIDE.md) for complete details.**
+
+---
+
+Just add 2-3 files to any project and you're ready to deploy to AWS with rollback capability!

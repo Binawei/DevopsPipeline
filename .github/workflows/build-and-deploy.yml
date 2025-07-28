@@ -172,3 +172,4 @@ jobs:
             -e database_type=${{ inputs.database_type }}
             
           echo "🎉 Deployment completed successfully!"
+          echo "Deployed image: $ECR_REGISTRY/${{ inputs.project_name }}:$IMAGE_TAG"

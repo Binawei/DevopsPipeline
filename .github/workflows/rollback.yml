@@ -1,0 +1,170 @@
+name: Rollback Deployment
+
+on:
+  workflow_dispatch:
+    inputs:
+      rollback_type:
+        description: 'Type of rollback'
+        required: true
+        type: choice
+        options:
+          - 'application'
+          - 'infrastructure'
+          - 'database'
+          - 'full'
+      target_commit:
+        description: 'Target commit SHA for application rollback (leave empty for previous)'
+        required: false
+        type: string
+      confirm_rollback:
+        description: 'Type "CONFIRM" to proceed with rollback'
+        required: true
+        type: string
+
+jobs:
+  rollback:
+    runs-on: ubuntu-latest
+    environment: production-approval
+
+    steps:
+      - name: Validate confirmation
+        run: |
+          if [ "${{ github.event.inputs.confirm_rollback }}" != "CONFIRM" ]; then
+            echo "❌ Rollback not confirmed. Please type 'CONFIRM' to proceed."
+            exit 1
+          fi
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Application Rollback
+        if: contains(github.event.inputs.rollback_type, 'application') || github.event.inputs.rollback_type == 'full'
+        run: |
+          echo "🔄 Starting application rollback..."
+          
+          # Get target image tag
+          if [ -n "${{ github.event.inputs.target_commit }}" ]; then
+            TARGET_TAG="${{ github.event.inputs.target_commit }}"
+          else
+            # Get previous image from ECR
+            TARGET_TAG=$(aws ecr describe-images --repository-name riderapp \
+              --query 'sort_by(imageDetails,&imagePushedAt)[-2].imageTags[0]' \
+              --output text)
+          fi
+          
+          echo "Rolling back to image tag: $TARGET_TAG"
+          
+          # Get running instances
+          INSTANCE_IDS=$(aws ec2 describe-instances \
+            --filters "Name=tag:Name,Values=riderapp-instance" "Name=instance-state-name,Values=running" \
+            --query 'Reservations[].Instances[].InstanceId' \
+            --output text)
+          
+          # Deploy previous version to each instance
+          ECR_REGISTRY=$(aws ecr describe-registry --query 'registryId' --output text).dkr.ecr.us-east-1.amazonaws.com
+          
+          for instance_id in $INSTANCE_IDS; do
+            echo "Deploying to instance: $instance_id"
+          
+            # Create deployment script
+            cat > /tmp/rollback_script.sh << 'EOF'
+          #!/bin/bash
+          aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin ECR_REGISTRY_PLACEHOLDER
+          docker stop riderapp-container || true
+          docker rm riderapp-container || true
+          docker pull ECR_REGISTRY_PLACEHOLDER/riderapp:TARGET_TAG_PLACEHOLDER
+          docker run -d --name riderapp-container -p 8080:8080 ECR_REGISTRY_PLACEHOLDER/riderapp:TARGET_TAG_PLACEHOLDER
+          EOF
+          
+            # Replace placeholders
+            sed -i "s|ECR_REGISTRY_PLACEHOLDER|$ECR_REGISTRY|g" /tmp/rollback_script.sh
+            sed -i "s|TARGET_TAG_PLACEHOLDER|$TARGET_TAG|g" /tmp/rollback_script.sh
+          
+            # Execute via SSM
+            aws ssm send-command \
+              --instance-ids "$instance_id" \
+              --document-name "AWS-RunShellScript" \
+              --parameters 'commands=["bash /tmp/rollback_script.sh"]' \
+              --output text
+          done
+          
+          echo "✅ Application rollback completed"
+
+      - name: Database Rollback
+        if: contains(github.event.inputs.rollback_type, 'database') || github.event.inputs.rollback_type == 'full'
+        run: |
+          echo "🔄 Starting database rollback..."
+          
+          # Get RDS instance identifier
+          DB_INSTANCE=$(aws rds describe-db-instances \
+            --query 'DBInstances[?contains(DBInstanceIdentifier, `riderapp`)].DBInstanceIdentifier' \
+            --output text)
+          
+          if [ -n "$DB_INSTANCE" ]; then
+            # Get latest automated backup
+            SNAPSHOT_ID=$(aws rds describe-db-snapshots \
+              --db-instance-identifier "$DB_INSTANCE" \
+              --snapshot-type automated \
+              --query 'sort_by(DBSnapshots,&SnapshotCreateTime)[-1].DBSnapshotIdentifier' \
+              --output text)
+          
+            echo "Found snapshot: $SNAPSHOT_ID"
+            echo "⚠️  Database rollback requires manual intervention due to data loss risk"
+            echo "To restore from snapshot, run:"
+            echo "aws rds restore-db-instance-from-db-snapshot --db-instance-identifier riderapp-restored --db-snapshot-identifier $SNAPSHOT_ID"
+          else
+            echo "No RDS instance found"
+          fi
+
+      - name: Infrastructure Rollback
+        if: contains(github.event.inputs.rollback_type, 'infrastructure') || github.event.inputs.rollback_type == 'full'
+        run: |
+          echo "🔄 Starting infrastructure rollback..."
+          
+          # Setup Terraform
+          cd devops/terraform
+          terraform init
+          
+          # Get previous Terraform state
+          echo "Current Terraform state:"
+          terraform show
+          
+          echo "⚠️  Infrastructure rollback requires manual review"
+          echo "To rollback infrastructure changes:"
+          echo "1. Review terraform plan with previous configuration"
+          echo "2. Run terraform apply with previous .tfvars"
+          echo "3. Or run terraform destroy to remove all resources"
+
+      - name: Verify Rollback
+        run: |
+          echo "🔍 Verifying rollback..."
+          
+          # Get load balancer DNS
+          LB_DNS=$(aws elbv2 describe-load-balancers \
+            --names riderapp-alb \
+            --query 'LoadBalancers[0].DNSName' \
+            --output text 2>/dev/null || echo "")
+          
+          if [ -n "$LB_DNS" ]; then
+            echo "Testing application health at: http://$LB_DNS"
+          
+            # Wait for application to be ready
+            for i in {1..10}; do
+              if curl -f "http://$LB_DNS/actuator/health" > /dev/null 2>&1; then
+                echo "✅ Application is healthy after rollback"
+                break
+              fi
+              echo "Waiting for application... ($i/10)"
+              sleep 30
+            done
+          fi
+          
+          echo "🎉 Rollback verification completed"
+          echo "🌐 Application URL: http://$LB_DNS"

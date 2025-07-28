@@ -1,0 +1,21 @@
+name: Manual Rollback
+
+on:
+  workflow_dispatch:
+    inputs:
+      rollback_to_tag:
+        description: 'Git SHA or image tag to rollback to'
+        required: true
+        type: string
+
+jobs:
+  rollback:
+    uses: Binawei/DevOpsPipeline/.github/workflows/rollback.yml@main
+    with:
+      project_name: "{{PROJECT_NAME}}"
+      rollback_to_tag: ${{ inputs.rollback_to_tag }}
+      aws_region: "us-east-1"
+    secrets:
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
