@@ -1,8 +1,12 @@
-name: Rollback Deployment
+name: Rollback ECS Deployment
 
 on:
   workflow_dispatch:
     inputs:
+      project_name:
+        description: 'Project name'
+        required: true
+        type: string
       rollback_type:
         description: 'Type of rollback'
         required: true
@@ -16,6 +20,11 @@ on:
         description: 'Target commit SHA for application rollback (leave empty for previous)'
         required: false
         type: string
+      aws_region:
+        description: 'AWS Region'
+        required: false
+        type: string
+        default: 'us-east-1'
       confirm_rollback:
         description: 'Type "CONFIRM" to proceed with rollback'
         required: true
@@ -42,60 +51,72 @@ jobs:
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: us-east-1
+          aws-region: ${{ github.event.inputs.aws_region }}
 
-      - name: Application Rollback
+      - name: ECS Application Rollback
         if: contains(github.event.inputs.rollback_type, 'application') || github.event.inputs.rollback_type == 'full'
         run: |
-          echo "🔄 Starting application rollback..."
+          echo "🔄 Starting ECS application rollback..."
+          
+          # Get ECS cluster and service names
+          CLUSTER_NAME="${{ github.event.inputs.project_name }}-cluster"
+          SERVICE_NAME="${{ github.event.inputs.project_name }}-service"
           
           # Get target image tag
           if [ -n "${{ github.event.inputs.target_commit }}" ]; then
             TARGET_TAG="${{ github.event.inputs.target_commit }}"
           else
             # Get previous image from ECR
-            TARGET_TAG=$(aws ecr describe-images --repository-name riderapp \
+            TARGET_TAG=$(aws ecr describe-images --repository-name ${{ github.event.inputs.project_name }} \
               --query 'sort_by(imageDetails,&imagePushedAt)[-2].imageTags[0]' \
               --output text)
           fi
           
           echo "Rolling back to image tag: $TARGET_TAG"
           
-          # Get running instances
-          INSTANCE_IDS=$(aws ec2 describe-instances \
-            --filters "Name=tag:Name,Values=riderapp-instance" "Name=instance-state-name,Values=running" \
-            --query 'Reservations[].Instances[].InstanceId' \
+          # Get ECR registry URL
+          ECR_REGISTRY=$(aws ecr describe-registry --query 'registryId' --output text).dkr.ecr.${{ github.event.inputs.aws_region }}.amazonaws.com
+          
+          # Get current task definition
+          CURRENT_TASK_DEF=$(aws ecs describe-services \
+            --cluster $CLUSTER_NAME \
+            --services $SERVICE_NAME \
+            --query 'services[0].taskDefinition' \
             --output text)
           
-          # Deploy previous version to each instance
-          ECR_REGISTRY=$(aws ecr describe-registry --query 'registryId' --output text).dkr.ecr.us-east-1.amazonaws.com
+          echo "Current task definition: $CURRENT_TASK_DEF"
           
-          for instance_id in $INSTANCE_IDS; do
-            echo "Deploying to instance: $instance_id"
+          # Get task definition details
+          TASK_DEFINITION=$(aws ecs describe-task-definition \
+            --task-definition $CURRENT_TASK_DEF \
+            --query 'taskDefinition' \
+            --output json)
           
-            # Create deployment script
-            cat > /tmp/rollback_script.sh << 'EOF'
-          #!/bin/bash
-          aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin ECR_REGISTRY_PLACEHOLDER
-          docker stop riderapp-container || true
-          docker rm riderapp-container || true
-          docker pull ECR_REGISTRY_PLACEHOLDER/riderapp:TARGET_TAG_PLACEHOLDER
-          docker run -d --name riderapp-container -p 8080:8080 ECR_REGISTRY_PLACEHOLDER/riderapp:TARGET_TAG_PLACEHOLDER
-          EOF
+          # Update image URI in task definition
+          NEW_TASK_DEFINITION=$(echo $TASK_DEFINITION | jq --arg IMAGE "$ECR_REGISTRY/${{ github.event.inputs.project_name }}:$TARGET_TAG" \
+            '.containerDefinitions[0].image = $IMAGE | del(.taskDefinitionArn) | del(.revision) | del(.status) | del(.requiresAttributes) | del(.placementConstraints) | del(.compatibilities) | del(.registeredAt) | del(.registeredBy)')
           
-            # Replace placeholders
-            sed -i "s|ECR_REGISTRY_PLACEHOLDER|$ECR_REGISTRY|g" /tmp/rollback_script.sh
-            sed -i "s|TARGET_TAG_PLACEHOLDER|$TARGET_TAG|g" /tmp/rollback_script.sh
+          # Register new task definition
+          NEW_TASK_DEF_ARN=$(echo $NEW_TASK_DEFINITION | aws ecs register-task-definition \
+            --cli-input-json file:///dev/stdin \
+            --query 'taskDefinition.taskDefinitionArn' \
+            --output text)
           
-            # Execute via SSM
-            aws ssm send-command \
-              --instance-ids "$instance_id" \
-              --document-name "AWS-RunShellScript" \
-              --parameters 'commands=["bash /tmp/rollback_script.sh"]' \
-              --output text
-          done
+          echo "New rollback task definition: $NEW_TASK_DEF_ARN"
           
-          echo "✅ Application rollback completed"
+          # Update ECS service with rollback task definition
+          aws ecs update-service \
+            --cluster $CLUSTER_NAME \
+            --service $SERVICE_NAME \
+            --task-definition $NEW_TASK_DEF_ARN
+          
+          # Wait for rollback deployment to complete
+          echo "Waiting for ECS service rollback to stabilize..."
+          aws ecs wait services-stable \
+            --cluster $CLUSTER_NAME \
+            --services $SERVICE_NAME
+          
+          echo "✅ ECS application rollback completed"
 
       - name: Database Rollback
         if: contains(github.event.inputs.rollback_type, 'database') || github.event.inputs.rollback_type == 'full'
@@ -104,7 +125,7 @@ jobs:
           
           # Get RDS instance identifier
           DB_INSTANCE=$(aws rds describe-db-instances \
-            --query 'DBInstances[?contains(DBInstanceIdentifier, `riderapp`)].DBInstanceIdentifier' \
+            --query 'DBInstances[?contains(DBInstanceIdentifier, `${{ github.event.inputs.project_name }}`)].DBInstanceIdentifier' \
             --output text)
           
           if [ -n "$DB_INSTANCE" ]; then
@@ -118,9 +139,9 @@ jobs:
             echo "Found snapshot: $SNAPSHOT_ID"
             echo "⚠️  Database rollback requires manual intervention due to data loss risk"
             echo "To restore from snapshot, run:"
-            echo "aws rds restore-db-instance-from-db-snapshot --db-instance-identifier riderapp-restored --db-snapshot-identifier $SNAPSHOT_ID"
+            echo "aws rds restore-db-instance-from-db-snapshot --db-instance-identifier ${{ github.event.inputs.project_name }}-restored --db-snapshot-identifier $SNAPSHOT_ID"
           else
-            echo "No RDS instance found"
+            echo "No RDS instance found for project: ${{ github.event.inputs.project_name }}"
           fi
 
       - name: Infrastructure Rollback
@@ -142,13 +163,13 @@ jobs:
           echo "2. Run terraform apply with previous .tfvars"
           echo "3. Or run terraform destroy to remove all resources"
 
-      - name: Verify Rollback
+      - name: Verify ECS Rollback
         run: |
-          echo "🔍 Verifying rollback..."
+          echo "🔍 Verifying ECS rollback..."
           
           # Get load balancer DNS
           LB_DNS=$(aws elbv2 describe-load-balancers \
-            --names riderapp-alb \
+            --names ${{ github.event.inputs.project_name }}-alb \
             --query 'LoadBalancers[0].DNSName' \
             --output text 2>/dev/null || echo "")
           
@@ -166,5 +187,25 @@ jobs:
             done
           fi
           
-          echo "🎉 Rollback verification completed"
+          # Get ECS service status
+          SERVICE_STATUS=$(aws ecs describe-services \
+            --cluster ${{ github.event.inputs.project_name }}-cluster \
+            --services ${{ github.event.inputs.project_name }}-service \
+            --query 'services[0].status' \
+            --output text)
+          
+          echo "ECS Service Status: $SERVICE_STATUS"
+          
+          # Get running task count
+          RUNNING_TASKS=$(aws ecs describe-services \
+            --cluster ${{ github.event.inputs.project_name }}-cluster \
+            --services ${{ github.event.inputs.project_name }}-service \
+            --query 'services[0].runningCount' \
+            --output text)
+          
+          echo "Running Tasks: $RUNNING_TASKS"
+          
+          echo "🎉 ECS rollback verification completed"
           echo "🌐 Application URL: http://$LB_DNS"
+          echo "🚀 ECS Cluster: ${{ github.event.inputs.project_name }}-cluster"
+          echo "⚙️ ECS Service: ${{ github.event.inputs.project_name }}-service"

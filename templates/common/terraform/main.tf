@@ -1,12 +1,10 @@
 variable "project_name" { type = string }
 variable "app_type" { type = string }
 variable "aws_region" { type = string }
-variable "instance_type" { type = string }
-variable "min_instances" { type = number }
-variable "max_instances" { type = number }
 variable "enable_database" { type = bool; default = false }
 variable "database_type" { type = string; default = "postgres" }
 variable "database_instance_class" { type = string; default = "db.t3.micro" }
+variable "image_uri" { type = string; description = "Docker image URI for ECS task" }
 
 provider "aws" {
   region = var.aws_region
@@ -58,26 +56,16 @@ resource "aws_route_table_association" "public" {
   route_table_id = aws_route_table.public.id
 }
 
-# Security Groups
-resource "aws_security_group" "app" {
-  name_prefix = "${var.project_name}-app-"
+# Security Groups for ECS
+resource "aws_security_group" "ecs_tasks" {
+  name_prefix = "${var.project_name}-ecs-tasks-"
   vpc_id      = aws_vpc.main.id
 
-  dynamic "ingress" {
-    for_each = var.app_type == "react-frontend" ? [80] : [8080]
-    content {
-      from_port   = ingress.value
-      to_port     = ingress.value
-      protocol    = "tcp"
-      cidr_blocks = ["0.0.0.0/0"]
-    }
-  }
-
   ingress {
-    from_port   = 22
-    to_port     = 22
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
+    from_port       = 8080
+    to_port         = 8080
+    protocol        = "tcp"
+    security_groups = [aws_security_group.alb.id]
   }
 
   egress {
@@ -86,6 +74,8 @@ resource "aws_security_group" "app" {
     protocol    = "-1"
     cidr_blocks = ["0.0.0.0/0"]
   }
+
+  tags = { Name = "${var.project_name}-ecs-tasks" }
 }
 
 # Load Balancer
@@ -116,42 +106,103 @@ resource "aws_security_group" "alb" {
   }
 }
 
-# Auto Scaling Group
-resource "aws_launch_template" "app" {
-  name_prefix   = "${var.project_name}-"
-  image_id      = data.aws_ami.amazon_linux.id
-  instance_type = var.instance_type
-  key_name      = "${var.project_name}-key"
-
-  vpc_security_group_ids = [aws_security_group.app.id]
-
-  user_data = base64encode(templatefile("${path.module}/user_data.sh", {
-    project_name = var.project_name
-    app_type     = var.app_type
-    aws_region   = var.aws_region
-  }))
+# ECS Cluster
+resource "aws_ecs_cluster" "main" {
+  name = "${var.project_name}-cluster"
+  
+  setting {
+    name  = "containerInsights"
+    value = "enabled"
+  }
+  
+  tags = { Name = "${var.project_name}-cluster" }
 }
 
-resource "aws_autoscaling_group" "app" {
-  name                = "${var.project_name}-asg"
-  vpc_zone_identifier = aws_subnet.public[*].id
-  target_group_arns   = [aws_lb_target_group.app.arn]
-  health_check_type   = "ELB"
+# ECS Task Definition
+resource "aws_ecs_task_definition" "app" {
+  family                   = var.project_name
+  network_mode             = "awsvpc"
+  requires_compatibilities = ["FARGATE"]
+  cpu                      = 256
+  memory                   = 512
+  execution_role_arn       = aws_iam_role.ecs_execution_role.arn
+  task_role_arn           = aws_iam_role.ecs_task_role.arn
 
-  min_size         = var.min_instances
-  max_size         = var.max_instances
-  desired_capacity = var.min_instances
+  container_definitions = jsonencode([
+    {
+      name  = var.project_name
+      image = var.image_uri
+      
+      portMappings = [
+        {
+          containerPort = 8080
+          protocol      = "tcp"
+        }
+      ]
+      
+      environment = var.enable_database ? [
+        {
+          name  = "SPRING_DATASOURCE_URL"
+          value = "jdbc:${var.database_type}://${var.enable_database ? aws_db_instance.main[0].endpoint : "localhost"}/${var.enable_database ? aws_db_instance.main[0].db_name : ""}"
+        }
+      ] : []
+      
+      secrets = var.enable_database ? [
+        {
+          name      = "SPRING_DATASOURCE_USERNAME"
+          valueFrom = aws_ssm_parameter.db_username[0].arn
+        },
+        {
+          name      = "SPRING_DATASOURCE_PASSWORD"
+          valueFrom = aws_ssm_parameter.db_password[0].arn
+        }
+      ] : []
+      
+      logConfiguration = {
+        logDriver = "awslogs"
+        options = {
+          "awslogs-group"         = aws_cloudwatch_log_group.app.name
+          "awslogs-region"        = var.aws_region
+          "awslogs-stream-prefix" = "ecs"
+        }
+      }
+      
+      essential = true
+    }
+  ])
+  
+  tags = { Name = "${var.project_name}-task-definition" }
+}
 
-  launch_template {
-    id      = aws_launch_template.app.id
-    version = "$Latest"
+# ECS Service
+resource "aws_ecs_service" "app" {
+  name            = "${var.project_name}-service"
+  cluster         = aws_ecs_cluster.main.id
+  task_definition = aws_ecs_task_definition.app.arn
+  desired_count   = 2
+  launch_type     = "FARGATE"
+  
+  network_configuration {
+    subnets          = aws_subnet.public[*].id
+    security_groups  = [aws_security_group.ecs_tasks.id]
+    assign_public_ip = true
   }
+  
+  load_balancer {
+    target_group_arn = aws_lb_target_group.app.arn
+    container_name   = var.project_name
+    container_port   = 8080
+  }
+  
+  depends_on = [aws_lb_listener.app]
+  
+  tags = { Name = "${var.project_name}-service" }
 }
 
 # Target Group
 resource "aws_lb_target_group" "app" {
   name     = "${var.project_name}-tg"
-  port     = var.app_type == "react-frontend" ? 80 : 8080
+  port     = 8080
   protocol = "HTTP"
   vpc_id   = aws_vpc.main.id
 
@@ -176,13 +227,75 @@ data "aws_availability_zones" "available" {
   state = "available"
 }
 
-data "aws_ami" "amazon_linux" {
-  most_recent = true
-  owners      = ["amazon"]
-  filter {
-    name   = "name"
-    values = ["amzn2-ami-hvm-*-x86_64-gp2"]
-  }
+# CloudWatch Log Group
+resource "aws_cloudwatch_log_group" "app" {
+  name              = "/ecs/${var.project_name}"
+  retention_in_days = 7
+  
+  tags = { Name = "${var.project_name}-logs" }
+}
+
+# IAM Roles for ECS
+resource "aws_iam_role" "ecs_execution_role" {
+  name = "${var.project_name}-ecs-execution-role"
+  
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Action = "sts:AssumeRole"
+        Effect = "Allow"
+        Principal = {
+          Service = "ecs-tasks.amazonaws.com"
+        }
+      }
+    ]
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "ecs_execution_role_policy" {
+  role       = aws_iam_role.ecs_execution_role.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
+}
+
+# Additional policy for Parameter Store access
+resource "aws_iam_role_policy" "ecs_execution_ssm_policy" {
+  count = var.enable_database ? 1 : 0
+  name  = "${var.project_name}-ecs-execution-ssm-policy"
+  role  = aws_iam_role.ecs_execution_role.id
+  
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "ssm:GetParameters",
+          "ssm:GetParameter"
+        ]
+        Resource = [
+          "arn:aws:ssm:${var.aws_region}:*:parameter/${var.project_name}/database/*"
+        ]
+      }
+    ]
+  })
+}
+
+resource "aws_iam_role" "ecs_task_role" {
+  name = "${var.project_name}-ecs-task-role"
+  
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Action = "sts:AssumeRole"
+        Effect = "Allow"
+        Principal = {
+          Service = "ecs-tasks.amazonaws.com"
+        }
+      }
+    ]
+  })
 }
 
 # Database Subnet Group
@@ -203,7 +316,7 @@ resource "aws_security_group" "database" {
     from_port       = var.database_type == "postgres" ? 5432 : 3306
     to_port         = var.database_type == "postgres" ? 5432 : 3306
     protocol        = "tcp"
-    security_groups = [aws_security_group.app.id]
+    security_groups = [aws_security_group.ecs_tasks.id]
   }
 
   egress {
@@ -212,6 +325,8 @@ resource "aws_security_group" "database" {
     protocol    = "-1"
     cidr_blocks = ["0.0.0.0/0"]
   }
+
+  tags = { Name = "${var.project_name}-database-sg" }
 }
 
 # RDS Instance
@@ -278,6 +393,8 @@ resource "aws_ssm_parameter" "db_password" {
   value = random_password.db_password[0].result
 }
 
+
+
 # Outputs
 output "load_balancer_dns" {
   value = aws_lb.main.dns_name
@@ -287,6 +404,15 @@ output "ecr_repository_url" {
   value = aws_ecr_repository.app.repository_url
 }
 
+output "ecs_cluster_name" {
+  value = aws_ecs_cluster.main.name
+}
+
+output "ecs_service_name" {
+  value = aws_ecs_service.app.name
+}
+
 output "database_endpoint" {
   value = var.enable_database ? aws_db_instance.main[0].endpoint : null
 }
+

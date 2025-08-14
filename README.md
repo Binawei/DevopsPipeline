@@ -11,28 +11,25 @@ python3 setup.py /path/to/your/project <app-type> <project-name>
 
 **Supported app types:**
 - `java-spring-boot` - For Spring Boot applications
-- `react-frontend` - For React applications  
-- `node-backend` - For Node.js applications
+- `node-backend` - For Node.js backend applications
 
 **Example:**
 ```bash
-# For backend
+# For Java backend
 python3 setup.py ../MyApp java-spring-boot myapp-backend
 
-# For frontend  
-python3 setup.py ../MyAppFrontend react-frontend myapp-frontend
+# For Node.js backend  
+python3 setup.py ../MyNodeApp node-backend myapp-node-backend
 ```
 
 ### 2. What Gets Created
 ```
 your-project/
 ├── devops/
-│   ├── terraform/          # Infrastructure as code
-│   ├── ansible/           # Deployment automation
-│   ├── docker/           # Container configuration
+│   ├── terraform/          # Infrastructure as code (ECS Fargate)
+│   ├── ecs/               # ECS task definitions
 │   └── scripts/          # Deployment scripts
 ├── Dockerfile            # Container definition
-├── Jenkinsfile          # CI/CD pipeline
 └── .github/workflows/   # GitHub Actions
 ```
 
@@ -56,17 +53,17 @@ flowchart TD
     %% AWS Infrastructure
     TERRAFORM --> VPC[🌐 AWS VPC<br/>Network Isolation]
     VPC --> ALB[⚖️ Application<br/>Load Balancer]
-    VPC --> EC2[💻 EC2 Auto Scaling<br/>2-6 Instances]
+    VPC --> ECS[🐳 ECS Fargate<br/>Serverless Containers]
     VPC --> RDS[🗄️ RDS Database<br/>PostgreSQL/MySQL]
     
-    %% Configuration Management
-    TERRAFORM --> ANSIBLE[⚙️ Ansible<br/>Configuration Management]
-    ANSIBLE --> CLOUDWATCH[📊 CloudWatch<br/>Monitoring]
-    ANSIBLE --> PARAMS[🔑 Parameter Store<br/>Secrets Management]
-    ANSIBLE --> SECURITY[🛡️ Security Groups<br/>Network Rules]
+    %% ECS Deployment
+    TERRAFORM --> ECS_SERVICE[⚙️ ECS Service<br/>Container Orchestration]
+    ECS_SERVICE --> CLOUDWATCH[📊 CloudWatch<br/>Monitoring]
+    ECS_SERVICE --> PARAMS[🔑 Parameter Store<br/>Secrets Management]
+    ECS_SERVICE --> SECURITY[🛡️ Security Groups<br/>Network Rules]
     
     %% Deployment Flow
-    ANSIBLE --> DEPLOY[🚀 Application<br/>Deployment]
+    ECS_SERVICE --> DEPLOY[🚀 Application<br/>Deployment]
     DEPLOY --> HEALTH[❤️ Health Check<br/>Validation]
     HEALTH --> ROLLBACK[🔄 Rollback<br/>Manual Trigger]
     
@@ -78,8 +75,8 @@ flowchart TD
     
     class DEV,GIT devOps
     class BUILD,TEST,DOCKER,APPROVAL cicd
-    class ECR,VPC,ALB,EC2,RDS,CLOUDWATCH,PARAMS aws
-    class TERRAFORM,ANSIBLE,DEPLOY,HEALTH,ROLLBACK devOps
+    class ECR,VPC,ALB,ECS,RDS,S3,CLOUDWATCH,PARAMS aws
+    class TERRAFORM,ECS_SERVICE,DEPLOY,HEALTH,ROLLBACK devOps
     class SECURITY security
 ```
 
@@ -91,7 +88,7 @@ sequenceDiagram
     participant GH as 🐙 GitHub Actions
     participant ECR as 📦 Amazon ECR
     participant TF as 🏗️ Terraform
-    participant ANS as ⚙️ Ansible
+    participant ECS as 🐳 ECS Fargate
     participant AWS as ☁️ AWS Infrastructure
     participant APP as 🚀 Application
     
@@ -103,12 +100,12 @@ sequenceDiagram
     GH->>TF: Apply Infrastructure
     TF->>AWS: Create/Update Resources
     AWS-->>TF: Resources Ready
-    TF->>ANS: Trigger Deployment
-    ANS->>ECR: Pull Docker Image
-    ANS->>AWS: Deploy to EC2 Instances
+    GH->>ECS: Update ECS Service
+    ECS->>ECR: Pull Docker Image
+    ECS->>AWS: Deploy to Fargate Tasks
     AWS->>APP: Start Application
-    APP-->>ANS: Health Check Response
-    ANS-->>GH: Deployment Complete
+    APP-->>ECS: Health Check Response
+    ECS-->>GH: Deployment Complete
     
     Note over Dev,APP: Zero-downtime deployment with rollback capability
 ```
@@ -131,7 +128,7 @@ mindmap
       Amazon ECR
       Container Runtime
     AWS Services
-      EC2 Auto Scaling
+      ECS Fargate
       VPC Networking
       Application Load Balancer
       RDS Database
@@ -142,9 +139,6 @@ mindmap
       Java Spring Boot
         Maven
         JUnit Testing
-      React Frontend
-        npm
-        Jest Testing
       Node.js Backend
         npm
         Jest Testing
@@ -156,26 +150,25 @@ mindmap
 
 **Infrastructure as Code:**
 - Terraform (AWS resource provisioning)
-- Ansible (Configuration management)
+- ECS Fargate (Serverless container orchestration)
 
 **Containerization:**
 - Docker (Application containerization)
 - Amazon ECR (Container registry)
 
 **AWS Services:**
-- EC2 (Compute instances)
+- ECS Fargate (Serverless containers)
 - VPC (Network isolation)
 - Application Load Balancer (Traffic distribution)
-- Auto Scaling Groups (Dynamic scaling)
+- Auto Scaling (Container-level scaling)
 - RDS (Managed databases)
 - CloudWatch (Monitoring & logging)
 - Parameter Store (Secrets management)
 - Security Groups (Network security)
 
 **Application Support:**
-- Java Spring Boot (Maven, JUnit)
-- React (npm, Jest)
-- Node.js (npm, Jest)
+- Java Spring Boot (Maven, JUnit) → ECS Fargate
+- Node.js Backend (npm, Jest) → ECS Fargate
 
 ## 📋 Step-by-Step Pipeline Flow
 
@@ -220,26 +213,26 @@ mindmap
 **7. Terraform Infrastructure**
 - Reads infrastructure configuration files
 - Creates/updates AWS resources:
-  - VPC with public/private subnets
+  - VPC with public subnets
   - Application Load Balancer for traffic distribution
-  - Auto Scaling Groups (2-6 EC2 instances)
+  - ECS Cluster and Fargate Services
   - RDS database (PostgreSQL/MySQL)
   - Security Groups for network access
   - CloudWatch for monitoring
   - Parameter Store for secrets
 
 ### Phase 4: Application Deployment
-**8. Ansible Configuration**
-- Connects to provisioned EC2 instances
-- Installs Docker and required software
-- Configures system settings and security
-- Sets up monitoring and logging agents
+**8. ECS Service Update**
+- Updates ECS task definition with new image
+- ECS automatically pulls Docker image from ECR
+- Performs rolling deployment to Fargate tasks
+- Maintains zero downtime during updates
 
-**9. Application Deployment**
-- Pulls Docker image from ECR
-- Stops old application containers (if any)
-- Starts new containers with zero downtime
-- Configures load balancer health checks
+**9. Container Orchestration**
+- ECS manages container lifecycle automatically
+- Load balancer routes traffic to healthy tasks
+- Auto-scaling adjusts task count based on demand
+- No server management required
 
 **10. Health Validation**
 - Performs application health checks
@@ -261,10 +254,10 @@ mindmap
 - Database rollback with backup restoration
 
 ### 🔄 Continuous Operation
-- **Auto Scaling**: EC2 instances scale based on traffic
-- **Health Monitoring**: Automatic replacement of unhealthy instances
-- **Security Updates**: Regular patching through Ansible
-- **Backup Management**: Automated database and application backups
+- **Auto Scaling**: ECS tasks scale based on traffic
+- **Health Monitoring**: Automatic replacement of unhealthy tasks
+- **Security Updates**: Automatic with new container deployments
+- **Backup Management**: Automated database backups
 
 ## 🚨 Failure Handling
 - **Build Failures**: Pipeline stops, notifications sent to team
@@ -289,8 +282,8 @@ mindmap
 - AWS Account
 - GitHub Account
 - Terraform installed
-- Ansible installed
 - Docker installed
+- AWS CLI configured
 
 ## 🌟 Benefits of Reusable Pipeline
 1. **Consistency** - Same deployment process across all projects

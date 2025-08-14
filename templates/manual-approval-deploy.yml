@@ -1,4 +1,4 @@
-name: Build and Deploy with Manual Approval
+name: ECS Fargate Deployment with Manual Approval
 
 on:
   push:
@@ -6,13 +6,13 @@ on:
   workflow_dispatch:
 
 jobs:
-  build-and-deploy:
-    uses: YOUR_USERNAME/DevOpsPipeline/.github/workflows/build-and-deploy.yml@main
+  deploy:
+    uses: YOUR_USERNAME/DevOpsPipeline/.github/workflows/setup-project.yml@main
     with:
       project_name: "{{PROJECT_NAME}}"
-      app_type: "{{APP_TYPE}}"
+      app_type: "{{APP_TYPE}}"  # java-spring-boot or node-backend
       aws_region: "us-east-1"
+      enable_database: false
     secrets:
       AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-      EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}

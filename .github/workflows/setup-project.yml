@@ -9,6 +9,7 @@ on:
       app_type:
         required: true
         type: string
+        description: 'Backend application type (java-spring-boot or node-backend)'
       aws_region:
         required: false
         type: string
@@ -30,8 +31,6 @@ on:
         required: true
       AWS_SECRET_ACCESS_KEY:
         required: true
-      EC2_SSH_KEY:
-        required: false
 
 jobs:
   build-and-deploy:
@@ -50,7 +49,7 @@ jobs:
         distribution: 'temurin'
     
     - name: Set up Node.js
-      if: inputs.app_type == 'react-frontend' || inputs.app_type == 'node-backend'
+      if: inputs.app_type == 'node-backend'
       uses: actions/setup-node@v4
       with:
         node-version: '18'
@@ -64,16 +63,12 @@ jobs:
       run: ./mvnw clean package -DskipTests
     
     - name: Install dependencies (Node)
-      if: inputs.app_type == 'react-frontend' || inputs.app_type == 'node-backend'
+      if: inputs.app_type == 'node-backend'
       run: npm ci
     
     - name: Run tests (Node)
-      if: inputs.app_type == 'react-frontend' || inputs.app_type == 'node-backend'
+      if: inputs.app_type == 'node-backend'
       run: npm test -- --coverage --watchAll=false
-    
-    - name: Build application (React)
-      if: inputs.app_type == 'react-frontend'
-      run: npm run build
     
     - name: Configure AWS credentials
       uses: aws-actions/configure-aws-credentials@v4
@@ -105,6 +100,24 @@ jobs:
       with:
         terraform_version: 1.5.0
     
+    - name: Check if ECS services already exist
+      run: |
+        # Check for existing ECS cluster and service
+        EXISTING_CLUSTER=$(aws ecs describe-clusters \
+          --clusters ${{ inputs.project_name }}-cluster \
+          --query 'clusters[0].status' \
+          --output text 2>/dev/null || echo "MISSING")
+        
+        echo "Existing cluster status: $EXISTING_CLUSTER"
+        
+        if [ "$EXISTING_CLUSTER" = "ACTIVE" ]; then
+          echo "CLUSTER_EXISTS=true" >> $GITHUB_ENV
+          echo "Found existing ECS cluster, will update service"
+        else
+          echo "CLUSTER_EXISTS=false" >> $GITHUB_ENV
+          echo "No existing cluster, Terraform will create new infrastructure"
+        fi
+    
     - name: Deploy infrastructure with Terraform
       env:
         TF_VAR_project_name: ${{ inputs.project_name }}
@@ -113,6 +126,7 @@ jobs:
         TF_VAR_enable_database: ${{ inputs.enable_database }}
         TF_VAR_database_type: ${{ inputs.database_type }}
         TF_VAR_database_instance_class: ${{ inputs.database_instance_class }}
+        TF_VAR_image_uri: ${{ steps.login-ecr.outputs.registry }}/${{ inputs.project_name }}:${{ github.sha }}
       run: |
         cd devops/terraform
         terraform init
@@ -122,135 +136,52 @@ jobs:
         # Get outputs
         echo "LOAD_BALANCER_DNS=$(terraform output -raw load_balancer_dns)" >> $GITHUB_ENV
         echo "ECR_REPOSITORY_URL=$(terraform output -raw ecr_repository_url)" >> $GITHUB_ENV
+        echo "ECS_CLUSTER_NAME=$(terraform output -raw ecs_cluster_name)" >> $GITHUB_ENV
+        echo "ECS_SERVICE_NAME=$(terraform output -raw ecs_service_name)" >> $GITHUB_ENV
     
-    - name: Check if instances already exist
-      run: |
-        # Check for existing EC2 instances with our tag
-        EXISTING_INSTANCES=$(aws ec2 describe-instances \
-          --filters "Name=tag:Name,Values=${{ inputs.project_name }}-instance" "Name=instance-state-name,Values=running" \
-          --query 'Reservations[].Instances[].InstanceId' \
-          --output text 2>/dev/null || echo "")
-        
-        echo "Existing instances: $EXISTING_INSTANCES"
-        
-        if [ -n "$EXISTING_INSTANCES" ] && [ "$EXISTING_INSTANCES" != "None" ]; then
-          echo "Found existing instances, will use them for deployment"
-        else
-          echo "No existing instances, Terraform will create new ones"
-        fi
-    
-    - name: Get running EC2 instances
-      run: |
-        # Wait for direct EC2 instances to be running
-        for i in {1..10}; do
-          echo "Attempt $i: Checking direct EC2 instances..."
-          
-          # Get instances by tag
-          RUNNING_INSTANCES=$(aws ec2 describe-instances \
-            --filters "Name=tag:Name,Values=${{ inputs.project_name }}-instance" "Name=instance-state-name,Values=running" \
-            --query 'Reservations[].Instances[].InstanceId' \
-            --output text 2>/dev/null || echo "")
-          
-          echo "Running instances: $RUNNING_INSTANCES"
-          
-          if [ -n "$RUNNING_INSTANCES" ] && [ "$RUNNING_INSTANCES" != "None" ]; then
-            echo "$RUNNING_INSTANCES" > /tmp/instance_ids.txt
-            break
-          fi
-          
-          echo "Waiting for instances to be running..."
-          sleep 30
-        done
-        
-        if [ ! -f /tmp/instance_ids.txt ]; then
-          echo "No running instances found after retries"
-          exit 1
-        fi
-        
-        echo "Found running instances: $(cat /tmp/instance_ids.txt)"
-    
-    - name: Setup SSH key for Ansible
-      run: |
-        # Use GitHub secret SSH key for existing instances
-        echo "Setting up SSH key for deployment..."
-        echo "${{ secrets.EC2_SSH_KEY }}" > /tmp/ssh_key.pem
-        chmod 600 /tmp/ssh_key.pem
-        
-        # Verify key format
-        if head -1 /tmp/ssh_key.pem | grep -q "BEGIN"; then
-          echo "SSH key format looks correct"
-        else
-          echo "SSH key format issue, trying Terraform key as fallback"
-          cd devops/terraform
-          terraform output -raw ssh_private_key > /tmp/ssh_key.pem
-          chmod 600 /tmp/ssh_key.pem
-        fi
-        
-        # Get instance IPs
-        INSTANCE_IDS=$(cat /tmp/instance_ids.txt)
-        INSTANCE_IPS=$(aws ec2 describe-instances \
-          --instance-ids $INSTANCE_IDS \
-          --query 'Reservations[].Instances[].PublicIpAddress' \
-          --output text)
-        
-        echo "Instance IPs: $INSTANCE_IPS"
-        
-        # Create Ansible directory and inventory
-        mkdir -p devops/ansible
-        echo "[production]" > devops/ansible/inventory
-        for ip in $INSTANCE_IPS; do
-          echo "$ip ansible_user=ec2-user ansible_ssh_private_key_file=/tmp/ssh_key.pem ansible_ssh_common_args='-o StrictHostKeyChecking=no'" >> devops/ansible/inventory
-        done
-        
-        echo "Generated inventory:"
-        cat devops/ansible/inventory
-    
-    - name: Deploy via Ansible
+    - name: Deploy to ECS Fargate
       env:
         ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
         IMAGE_TAG: ${{ github.sha }}
       run: |
-        # Install Ansible
-        pip install ansible
+        # Create new task definition with updated image
+        TASK_DEFINITION=$(aws ecs describe-task-definition \
+          --task-definition ${{ inputs.project_name }} \
+          --query 'taskDefinition' \
+          --output json)
         
-        # Test SSH connectivity first
-        echo "Testing SSH connectivity..."
-        INSTANCE_IDS=$(cat /tmp/instance_ids.txt)
-        INSTANCE_IPS=$(aws ec2 describe-instances \
-          --instance-ids $INSTANCE_IDS \
-          --query 'Reservations[].Instances[].PublicIpAddress' \
+        # Update image URI in task definition
+        NEW_TASK_DEFINITION=$(echo $TASK_DEFINITION | jq --arg IMAGE "$ECR_REGISTRY/${{ inputs.project_name }}:$IMAGE_TAG" \
+          '.containerDefinitions[0].image = $IMAGE | del(.taskDefinitionArn) | del(.revision) | del(.status) | del(.requiresAttributes) | del(.placementConstraints) | del(.compatibilities) | del(.registeredAt) | del(.registeredBy)')
+        
+        # Register new task definition
+        NEW_TASK_DEF_ARN=$(echo $NEW_TASK_DEFINITION | aws ecs register-task-definition \
+          --cli-input-json file:///dev/stdin \
+          --query 'taskDefinition.taskDefinitionArn' \
           --output text)
         
-        # Wait for SSH to be ready
-        for ip in $INSTANCE_IPS; do
-          echo "Testing SSH to $ip..."
-          for i in {1..5}; do
-            if ssh -i /tmp/ssh_key.pem -o StrictHostKeyChecking=no -o ConnectTimeout=5 ec2-user@$ip "echo SSH OK"; then
-              echo "SSH to $ip is working"
-              break
-            fi
-            echo "SSH attempt $i failed, retrying..."
-            sleep 10
-          done
-        done
+        echo "New task definition: $NEW_TASK_DEF_ARN"
         
-        # Run Ansible playbook
-        cd devops/ansible
-        if ansible-playbook -i inventory deploy.yml -e "ecr_registry=$ECR_REGISTRY" -e "image_tag=$IMAGE_TAG" -e "project_name=${{ inputs.project_name }}" -e "aws_region=${{ inputs.aws_region }}" -vv; then
-          echo "Ansible deployment successful"
-        else
-          echo "Ansible failed, trying direct deployment via user_data service..."
-          # Trigger deployment via systemd service on each instance
-          INSTANCE_IDS=$(cat /tmp/instance_ids.txt)
-          for instance_id in $INSTANCE_IDS; do
-            echo "Triggering deployment on $instance_id via user_data service"
-            # The instances have systemd service that can be triggered
-            # This is a fallback when SSH doesn't work
-          done
-        fi
+        # Update ECS service with new task definition
+        aws ecs update-service \
+          --cluster ${{ env.ECS_CLUSTER_NAME }} \
+          --service ${{ env.ECS_SERVICE_NAME }} \
+          --task-definition $NEW_TASK_DEF_ARN
+        
+        # Wait for deployment to complete
+        echo "Waiting for ECS service to stabilize..."
+        aws ecs wait services-stable \
+          --cluster ${{ env.ECS_CLUSTER_NAME }} \
+          --services ${{ env.ECS_SERVICE_NAME }}
+        
+        echo "ECS deployment completed successfully!"
+    
+
     
     - name: Output deployment info
       run: |
         echo "🎉 Deployment completed successfully!"
         echo "🌐 Application URL: http://${{ env.LOAD_BALANCER_DNS }}"
         echo "📦 Docker Image: ${{ env.ECR_REPOSITORY_URL }}:${{ github.sha }}"
+        echo "🚀 ECS Cluster: ${{ env.ECS_CLUSTER_NAME }}"
+        echo "⚙️ ECS Service: ${{ env.ECS_SERVICE_NAME }}"
