@@ -145,23 +145,19 @@ jobs:
         IMAGE_TAG: ${{ github.sha }}
       run: |
         # Create new task definition with updated image
-        TASK_DEFINITION=$(aws ecs describe-task-definition \
-          --task-definition ${{ inputs.project_name }} \
-          --query 'taskDefinition' \
-          --output json)
-
-        # Update image URI in task definition (more robust jq command)
-        NEW_TASK_DEFINITION=$(echo "$TASK_DEFINITION" | jq --arg IMAGE "$ECR_REGISTRY/${{ inputs.project_name }}:$IMAGE_TAG" '
+          TASK_DEFINITION=$(aws ecs describe-task-definition --task-definition ${{ inputs.project_name }} --query 'taskDefinition')
+          
+          # Write to temporary file and process
+          echo "$TASK_DEFINITION" > /tmp/task-def.json
+          
+          # Update image and clean metadata
+          jq --arg IMAGE "$ECR_REGISTRY/${{ inputs.project_name }}:$IMAGE_TAG" '
           .containerDefinitions[0].image = $IMAGE |
           del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .placementConstraints, .compatibilities, .registeredAt, .registeredBy, .tags)
-        ')
-
-        # Debug: Show the JSON being sent
-        echo "Task definition JSON:"
-        echo "$NEW_TASK_DEFINITION" | jq .
-
+          ' /tmp/task-def.json > /tmp/new-task-def.json
+        
         # Register new task definition
-        NEW_TASK_DEF_ARN=$(aws ecs register-task-definition --cli-input-json "$NEW_TASK_DEFINITION" --query 'taskDefinition.taskDefinitionArn' --output text)
+        NEW_TASK_DEF_ARN=$(aws ecs register-task-definition --cli-input-json file:///tmp/new-task-def.json --query 'taskDefinition.taskDefinitionArn' --output text)
 
         echo "New task definition: $NEW_TASK_DEF_ARN"
 
