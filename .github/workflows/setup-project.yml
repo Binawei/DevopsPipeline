@@ -161,10 +161,7 @@ jobs:
         echo "$NEW_TASK_DEFINITION" | jq .
 
         # Register new task definition
-        NEW_TASK_DEF_ARN=$(echo "$NEW_TASK_DEFINITION" | aws ecs register-task-definition \
-          --cli-input-json file:///dev/stdin \
-          --query 'taskDefinition.taskDefinitionArn' \
-          --output text)
+        NEW_TASK_DEF_ARN=$(aws ecs register-task-definition --cli-input-json "$NEW_TASK_DEFINITION" --query 'taskDefinition.taskDefinitionArn' --output text)
 
         echo "New task definition: $NEW_TASK_DEF_ARN"
 
