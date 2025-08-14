@@ -143,8 +143,6 @@ jobs:
       env:
         ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
         IMAGE_TAG: ${{ github.sha }}
-        ECS_CLUSTER_NAME: ${{ steps.terraform.outputs.ecs_cluster_name }}
-        ECS_SERVICE_NAME: ${{ steps.terraform.outputs.ecs_service_name }}
       run: |
         # Create new task definition with updated image
         TASK_DEFINITION=$(aws ecs describe-task-definition --task-definition ${{ inputs.project_name }} --query 'taskDefinition')
