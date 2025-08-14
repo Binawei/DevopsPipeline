@@ -138,7 +138,7 @@ jobs:
         echo "ECR_REPOSITORY_URL=$(terraform output -raw ecr_repository_url)" >> $GITHUB_ENV
         echo "ECS_CLUSTER_NAME=$(terraform output -raw ecs_cluster_name)" >> $GITHUB_ENV
         echo "ECS_SERVICE_NAME=$(terraform output -raw ecs_service_name)" >> $GITHUB_ENV
-    
+
     - name: Deploy to ECS Fargate
       env:
         ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
@@ -149,34 +149,38 @@ jobs:
           --task-definition ${{ inputs.project_name }} \
           --query 'taskDefinition' \
           --output json)
-        
-        # Update image URI in task definition
-        NEW_TASK_DEFINITION=$(echo $TASK_DEFINITION | jq --arg IMAGE "$ECR_REGISTRY/${{ inputs.project_name }}:$IMAGE_TAG" \
-          '.containerDefinitions[0].image = $IMAGE | del(.taskDefinitionArn) | del(.revision) | del(.status) | del(.requiresAttributes) | del(.placementConstraints) | del(.compatibilities) | del(.registeredAt) | del(.registeredBy)')
-        
+
+        # Update image URI in task definition (more robust jq command)
+        NEW_TASK_DEFINITION=$(echo "$TASK_DEFINITION" | jq --arg IMAGE "$ECR_REGISTRY/${{ inputs.project_name }}:$IMAGE_TAG" '
+          .containerDefinitions[0].image = $IMAGE |
+          del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .placementConstraints, .compatibilities, .registeredAt, .registeredBy, .tags)
+        ')
+
+        # Debug: Show the JSON being sent
+        echo "Task definition JSON:"
+        echo "$NEW_TASK_DEFINITION" | jq .
+
         # Register new task definition
-        NEW_TASK_DEF_ARN=$(echo $NEW_TASK_DEFINITION | aws ecs register-task-definition \
+        NEW_TASK_DEF_ARN=$(echo "$NEW_TASK_DEFINITION" | aws ecs register-task-definition \
           --cli-input-json file:///dev/stdin \
           --query 'taskDefinition.taskDefinitionArn' \
           --output text)
-        
+
         echo "New task definition: $NEW_TASK_DEF_ARN"
-        
+
         # Update ECS service with new task definition
         aws ecs update-service \
           --cluster ${{ env.ECS_CLUSTER_NAME }} \
           --service ${{ env.ECS_SERVICE_NAME }} \
           --task-definition $NEW_TASK_DEF_ARN
-        
+
         # Wait for deployment to complete
         echo "Waiting for ECS service to stabilize..."
         aws ecs wait services-stable \
           --cluster ${{ env.ECS_CLUSTER_NAME }} \
           --services ${{ env.ECS_SERVICE_NAME }}
-        
-        echo "ECS deployment completed successfully!"
-    
 
+        echo "ECS deployment completed successfully!"
     
     - name: Output deployment info
       run: |
