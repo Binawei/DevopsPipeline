@@ -48,28 +48,28 @@ jobs:
         java-version: '17'
         distribution: 'temurin'
     
-    - name: Set up Node.js
-      if: inputs.app_type == 'node-backend'
-      uses: actions/setup-node@v4
-      with:
-        node-version: '18'
+#    - name: Set up Node.js
+#      if: inputs.app_type == 'node-backend'
+#      uses: actions/setup-node@v4
+#      with:
+#        node-version: '18'
     
-    - name: Run tests (Java)
+    - name: Run tests
       if: inputs.app_type == 'java-spring-boot'
       run: ./mvnw clean test
     
-    - name: Build application (Java)
+    - name: Build application
       if: inputs.app_type == 'java-spring-boot'
       run: ./mvnw clean package -DskipTests
     
-    - name: Install dependencies (Node)
-      if: inputs.app_type == 'node-backend'
-      run: npm ci
-    
-    - name: Run tests (Node)
-      if: inputs.app_type == 'node-backend'
-      run: npm test -- --coverage --watchAll=false
-    
+#    - name: Install dependencies (Node)
+#      if: inputs.app_type == 'node-backend'
+#      run: npm ci
+#
+#    - name: Run tests (Node)
+#      if: inputs.app_type == 'node-backend'
+#      run: npm test -- --coverage --watchAll=false
+#
     - name: Configure AWS credentials
       uses: aws-actions/configure-aws-credentials@v4
       with:

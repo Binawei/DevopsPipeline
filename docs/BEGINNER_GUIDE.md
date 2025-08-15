@@ -41,6 +41,7 @@ Shows you step-by-step how to:
    - `ElasticLoadBalancingFullAccess`
    - `AutoScalingFullAccess`
    - `AmazonVPCFullAccess`
+   - `AmazonECSFullAcces`
 8. **Click "Next"** then **"Create user"**
 
 ### 1.3 Create Access Keys

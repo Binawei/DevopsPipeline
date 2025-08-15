@@ -170,7 +170,7 @@ resource "aws_ecs_task_definition" "app" {
       essential = true
     }
   ])
-  
+
   tags = { Name = "${var.project_name}-task-definition" }
 }
 
@@ -195,7 +195,7 @@ resource "aws_ecs_service" "app" {
   }
   
   depends_on = [aws_lb_listener.app]
-  
+
   tags = { Name = "${var.project_name}-service" }
 }
 

@@ -2,12 +2,12 @@
 
 ## 🎯 **What This Pipeline Does**
 
-Automatically builds and deploys your applications (Java, React, Node.js) to AWS EC2 with:
+Automatically builds and deploys your backend applications (Java Spring Boot, Node.js) to AWS ECS Fargate with:
 - ✅ **Build on every push** (any branch)
 - ✅ **Manual approval for deployment** (main/master only)
-- ✅ **Auto-scaling infrastructure** (Load Balancer + EC2)
+- ✅ **Serverless container infrastructure** (ECS Fargate + ALB)
 - ✅ **Managed RDS database** (PostgreSQL/MySQL)
-- ✅ **Zero manual setup** (everything automated)
+- ✅ **Zero server management** (everything automated)
 
 ---
 
@@ -24,21 +24,6 @@ WORKDIR /app
 COPY target/*.jar app.jar
 EXPOSE 8080
 ENTRYPOINT ["java", "-jar", "/app/app.jar"]
-```
-
-**For React Frontend:**
-```dockerfile
-FROM node:18-alpine as build
-WORKDIR /app
-COPY package*.json ./
-RUN npm install
-COPY . .
-RUN npm run build
-
-FROM nginx:alpine
-COPY --from=build /app/build /usr/share/nginx/html
-EXPOSE 80
-CMD ["nginx", "-g", "daemon off;"]
 ```
 
 **For Node.js Backend:**
@@ -66,10 +51,10 @@ on:
 
 jobs:
   build-and-deploy:
-    uses: YOUR_USERNAME/DevOpsPipeline/.github/workflows/build-and-deploy.yml@main
+    uses: YOUR_USERNAME/DevOpsPipeline/.github/workflows/setup-project.yml@main
     with:
       project_name: "my-app-name"           # Change this
-      app_type: "java-spring-boot"          # Change this: java-spring-boot, react-frontend, node-backend
+      app_type: "java-spring-boot"          # Change this: java-spring-boot or node-backend
       aws_region: "us-east-1"
       enable_database: true                  # Add this for database support
       database_type: "postgres"             # Add this: postgres or mysql
@@ -77,7 +62,6 @@ jobs:
     secrets:
       AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-      EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
 ```
 
 #### **Step 3: Setup GitHub Environment Protection**
@@ -94,7 +78,6 @@ jobs:
 2. **Click "New repository secret"** and add:
    - **Name**: `AWS_ACCESS_KEY_ID` **Value**: Your AWS access key
    - **Name**: `AWS_SECRET_ACCESS_KEY` **Value**: Your AWS secret key
-   - **Name**: `EC2_SSH_KEY` **Value**: Your EC2 private key content (entire .pem file)
 
 #### **Step 5: Push and Deploy**
 
@@ -140,7 +123,6 @@ jobs:
     secrets:
       AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-      EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
 ```
 
 ---
@@ -204,12 +186,12 @@ Push Code → Build Docker Image → Push to ECR → ✅ Done
 
 ### **Main/Master Branch (Manual Approval):**
 ```
-Push Code → Build Docker Image → 🔘 Approval Button → Click → Deploy to EC2 → ✅ Live App
+Push Code → Build Docker Image → 🔘 Approval Button → Click → Deploy to ECS Fargate → ✅ Live App
 ```
 
 ### **Main/Master Branch (Auto Deploy):**
 ```
-Push Code → Build Docker Image → Deploy to EC2 → ✅ Live App
+Push Code → Build Docker Image → Deploy to ECS Fargate → ✅ Live App
 ```
 
 ---
@@ -220,7 +202,7 @@ Push Code → Build Docker Image → Deploy to EC2 → ✅ Live App
 ```yaml
 with:
   project_name: "my-custom-app"      # Your app name
-  app_type: "react-frontend"         # java-spring-boot, react-frontend, node-backend
+  app_type: "node-backend"           # java-spring-boot or node-backend
   aws_region: "eu-west-1"           # Any AWS region
 ```
 
@@ -287,18 +269,13 @@ on:
 
 ### **Deployment Fails:**
 - Verify AWS credentials in GitHub secrets
-- Check if EC2 SSH key is correct
-- Ensure your app has health check endpoint
-
-### **No Approval Button:**
-- Make sure you're on main/master branch
-- Check environment protection is set up
-- Verify environment name is `production-approval`
+- Check ECS task logs in AWS Console
+- Ensure your app runs on port 8080
 
 ### **App Not Accessible:**
-- Wait 5-10 minutes for infrastructure setup
+- Wait 5-10 minutes for ECS tasks to start
 - Check AWS Console for Load Balancer status
-- Verify security groups allow traffic
+- Verify ECS tasks are running and healthy
 
 ---
 
@@ -330,10 +307,10 @@ on:
 
 With this setup, you get:
 - ✅ **Professional CI/CD pipeline**
-- ✅ **AWS production infrastructure**
+- ✅ **Serverless container infrastructure**
 - ✅ **Automatic scaling and load balancing**
 - ✅ **Manual deployment control**
-- ✅ **Zero maintenance overhead**
+- ✅ **Zero server management**
 
 ## 🔄 **Manual Rollback**
 
@@ -358,13 +335,4 @@ jobs:
     secrets:
       AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-      EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
 ```
-
-**Usage**: Actions tab → Manual Rollback → Enter git SHA → Run (3-5 minutes)
-
-**See [ROLLBACK_GUIDE.md](docs/ROLLBACK_GUIDE.md) for complete details.**
-
----
-
-Just add 2-3 files to any project and you're ready to deploy to AWS with rollback capability!
